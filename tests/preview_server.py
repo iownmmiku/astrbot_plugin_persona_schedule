@@ -3,6 +3,7 @@ import asyncio
 import copy
 import json
 import sys
+import types
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -15,11 +16,23 @@ from aiohttp import web
 
 async def main():
     ctx = FakeContext()
+    providers = [types.SimpleNamespace(meta=lambda pid=pid: types.SimpleNamespace(id=pid, type="chat_completion"),
+                 get_model=lambda model=model: model)
+                 for pid, model in [("creative-plan", "schedule-model"), ("character-chat", "reply-model")]]
+    ctx.get_all_providers = lambda: providers
+    ctx.get_provider_by_id = lambda pid: next((p for p in providers if p.meta().id == pid), None)
+    original_generate = ctx.llm_generate
+    async def slow_fixture_generate(**kwargs):
+        # Make refresh/reopen recovery observable during local UI QA.
+        await asyncio.sleep(2)
+        return await original_generate(**kwargs)
+    ctx.llm_generate = slow_fixture_generate
     fixtures = {
         "星野澪": "日本东京的高中生星野澪，周末喜欢和朋友去街机厅，生活在日本，不庆祝中国中秋节。",
         "林澄": "中国杭州的自由插画师林澄，喜欢茶和桂花，中秋节会回家和家人团聚。",
         "艾莉亚": "自创世界银湾城的巡林员艾莉亚，精灵，在霜月祭为古树祈福，无现实国家和学校。",
     }
+    ctx.persona_manager.item = {"persona_id": "星野澪", "system_prompt": fixtures["星野澪"]}
     async def get_persona(pid):
         return {"persona_id": pid, "system_prompt": fixtures[pid]}
     async def get_all():
@@ -70,7 +83,7 @@ async def main():
         name=request.match_info['name']
         if name not in {'app.js','style.css','vendor/rhinelab/content-transition.js'}:raise web.HTTPNotFound()
         return web.FileResponse(ROOT/'views/schedule'/name)
-    handlers={"state":plugin.web_state,"detail":plugin.web_detail,"settings":plugin.web_settings,"generate":plugin.web_generate,"job":plugin.web_job,"save":plugin.web_save,"queue":plugin.web_queue}
+    handlers={"state":plugin.web_state,"detail":plugin.web_detail,"settings":plugin.web_settings,"generate":plugin.web_generate,"job":plugin.web_job,"save":plugin.web_save,"queue":plugin.web_queue,"providers":plugin.web_providers,"diagnostics":plugin.web_diagnostics}
     async def api(request):
         try:
             payload=await request.json() if request.method=='POST' else dict(request.query)

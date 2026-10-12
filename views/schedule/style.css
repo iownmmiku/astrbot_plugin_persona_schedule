@@ -163,7 +163,7 @@ h3 {
 }
 
 small {
-  font-size:11px
+  font-size:12px
 }
 
 b,strong {
@@ -208,7 +208,7 @@ b,strong {
 .brand small {
   display:block;
   margin-top:7px;
-  font-size:10px;
+  font-size:12px;
   letter-spacing:2px
 }
 
@@ -244,7 +244,7 @@ b,strong {
 
 .system-id span {
   display:block;
-  font-size:9px;
+  font-size:12px;
   letter-spacing:1px;
   color:var(--muted)
 }
@@ -258,7 +258,7 @@ b,strong {
   display:flex;
   align-items:center;
   gap:9px;
-  font-size:11px;
+  font-size:12px;
   white-space:nowrap
 }
 
@@ -320,7 +320,7 @@ b,strong {
 
 .archive-nav small {
   display:block;
-  font-size:9px;
+  font-size:12px;
   letter-spacing:1.1px;
   margin-bottom:3px
 }
@@ -330,7 +330,7 @@ b,strong {
 }
 
 .archive-nav b {
-  font-size:9px;
+  font-size:12px;
   min-width:17px;
   display:inline-block;
   text-align:center;
@@ -352,7 +352,7 @@ main {
 }
 
 .page-caption {
-  font-size:10px;
+  font-size:12px;
   color:var(--muted);
   letter-spacing:.7px
 }
@@ -360,7 +360,7 @@ main {
 .draft-status {
   margin-left:auto;
   color:var(--accent);
-  font-size:11px
+  font-size:12px
 }
 
 .draft-status:empty {
@@ -400,7 +400,7 @@ main {
 
 .toolbar label>span {
   display:block;
-  font-size:9px;
+  font-size:12px;
   color:var(--muted);
   letter-spacing:1px;
   margin-bottom:6px
@@ -436,13 +436,13 @@ main {
 }
 
 #job-status {
-  font-size:11px;
+  font-size:12px;
   color:var(--accent);
   max-width:240px
 }
 
 .section-code,.eyebrow {
-  font-size:9px;
+  font-size:12px;
   letter-spacing:1.35px;
   color:var(--muted);
   line-height:1.5
@@ -474,7 +474,7 @@ main {
 .heading-copy h2 small {
   font-weight:400;
   color:var(--muted);
-  font-size:11px;
+  font-size:12px;
   margin-left:7px;
   white-space:nowrap
 }
@@ -491,7 +491,7 @@ main {
 }
 
 .hint,.subtle {
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   line-height:1.9;
   margin:12px 0;
@@ -535,7 +535,7 @@ main {
 
 .dossier>.section-code {
   display:flex;
-  font-size:8px;
+  font-size:12px;
   letter-spacing:.8px
 }
 
@@ -573,7 +573,7 @@ main {
 }
 
 .persona-heading small {
-  font-size:8px;
+  font-size:12px;
   letter-spacing:1px;
   color:var(--muted)
 }
@@ -608,7 +608,7 @@ main {
 }
 
 .persona-tags span {
-  font-size:9px;
+  font-size:12px;
   border:1px solid var(--line);
   padding:2px 7px;
   color:var(--muted)
@@ -683,7 +683,7 @@ main {
 }
 
 .orbit-ring small {
-  font-size:8px;
+  font-size:12px;
   letter-spacing:2px
 }
 
@@ -698,7 +698,7 @@ main {
 .diagram-axis {
   position:absolute;
   left:0;
-  font-size:7px;
+  font-size:12px;
   letter-spacing:1px;
   color:var(--muted)
 }
@@ -725,7 +725,7 @@ main {
   justify-content:space-between;
   align-items:center;
   margin:14px 0 24px;
-  font-size:10px;
+  font-size:12px;
   color:var(--muted)
 }
 
@@ -743,7 +743,7 @@ main {
 }
 
 .dossier-section p {
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   line-height:1.9;
   margin-top:10px
@@ -759,7 +759,7 @@ main {
   padding-top:14px;
   margin-top:26px;
   color:var(--muted);
-  font-size:10px;
+  font-size:12px;
   line-height:1.9
 }
 
@@ -778,7 +778,7 @@ main {
   display:flex;
   justify-content:space-between;
   align-items:center;
-  font-size:9px;
+  font-size:12px;
   letter-spacing:1px;
   color:var(--muted);
   gap:10px
@@ -807,7 +807,7 @@ main {
   display:flex;
   gap:13px;
   align-items:flex-start;
-  font-size:11px
+  font-size:12px
 }
 
 .contact-status {
@@ -837,7 +837,7 @@ main {
   display:flex;
   gap:12px;
   color:var(--muted);
-  font-size:11px;
+  font-size:12px;
   margin-top:20px
 }
 
@@ -851,7 +851,7 @@ main {
   flex-wrap:wrap;
   gap:8px;
   margin-top:10px;
-  font-size:10px;
+  font-size:12px;
   color:var(--accent)
 }
 
@@ -879,7 +879,7 @@ main {
 .status-legend {
   display:flex;
   gap:16px;
-  font-size:9px;
+  font-size:12px;
   color:var(--muted);
   flex-wrap:wrap
 }
@@ -954,7 +954,7 @@ main {
   display:flex;
   justify-content:space-between;
   color:var(--muted);
-  font-size:8px;
+  font-size:12px;
   font-variant-numeric:tabular-nums;
   margin-top:7px
 }
@@ -965,7 +965,7 @@ main {
   align-items:center;
   border-top:1px solid var(--soft-line);
   padding-top:13px;
-  font-size:10px;
+  font-size:12px;
   color:var(--muted)
 }
 
@@ -989,7 +989,7 @@ main {
 }
 
 .date-strip .day-name {
-  font-size:9px;
+  font-size:12px;
   color:var(--muted)
 }
 
@@ -1029,7 +1029,7 @@ main {
   padding:7px 0;
   border-top:1px solid var(--ink);
   border-bottom:1px solid var(--line);
-  font-size:8px;
+  font-size:12px;
   color:var(--muted);
   letter-spacing:1px
 }
@@ -1057,7 +1057,7 @@ main {
 .timeline-time small {
   display:block;
   color:var(--muted);
-  font-size:10px;
+  font-size:12px;
   margin-top:8px
 }
 
@@ -1104,15 +1104,15 @@ main {
   gap:9px;
   flex-wrap:wrap;
   color:var(--muted);
-  font-size:10px
+  font-size:12px
 }
 
 .card-meta>small {
-  font-size:9px
+  font-size:12px
 }
 
 .badge {
-  font-size:9px;
+  font-size:12px;
   padding:1px 6px;
   border:1px solid var(--line);
   color:var(--muted);
@@ -1135,7 +1135,7 @@ main {
 }
 
 .current-label {
-  font-size:8px;
+  font-size:12px;
   color:var(--accent);
   letter-spacing:.6px
 }
@@ -1147,7 +1147,7 @@ main {
 }
 
 .card p {
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   line-height:1.8;
   white-space:pre-line;
@@ -1156,7 +1156,7 @@ main {
 }
 
 .card a {
-  font-size:10px
+  font-size:12px
 }
 
 .actions {
@@ -1235,7 +1235,7 @@ main {
 
 .profile-details summary small {
   display:block;
-  font-size:10px;
+  font-size:12px;
   color:var(--muted);
   margin-top:4px
 }
@@ -1267,7 +1267,7 @@ main {
   border:0;
   padding:8px 0;
   background:none;
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   border-bottom:2px solid transparent;
   margin-bottom:-1px
@@ -1318,7 +1318,7 @@ main {
 }
 
 .weekday-labels {
-  font-size:9px;
+  font-size:12px;
   color:var(--muted);
   text-align:center;
   margin-bottom:10px
@@ -1359,7 +1359,7 @@ main {
 }
 
 .month-event {
-  font-size:8px;
+  font-size:12px;
   display:block;
   width:100%;
   white-space:nowrap;
@@ -1376,14 +1376,14 @@ main {
 }
 
 .month-more {
-  font-size:8px;
+  font-size:12px;
   color:var(--muted)
 }
 
 .calendar-key {
   display:flex;
   gap:20px;
-  font-size:9px;
+  font-size:12px;
   color:var(--muted);
   margin-top:15px
 }
@@ -1409,7 +1409,7 @@ main {
 
 .event-stamp small {
   display:block;
-  font-size:8px;
+  font-size:12px;
   color:var(--muted)
 }
 
@@ -1433,7 +1433,7 @@ main {
   padding:16px 20px;
   max-height:340px;
   overflow:auto;
-  font-size:11px;
+  font-size:12px;
   font-variant-numeric:tabular-nums
 }
 
@@ -1449,7 +1449,7 @@ main {
 
 label {
   display:block;
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   min-width:0
 }
@@ -1524,7 +1524,7 @@ input[type="checkbox"]:focus-visible {
 }
 
 .settings-card h3>span {
-  font-size:11px;
+  font-size:12px;
   letter-spacing:2px;
   margin-right:9px;
   color:var(--accent)
@@ -1548,7 +1548,7 @@ input[type="checkbox"]:focus-visible {
 }
 
 .toggle-row p {
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   margin-top:3px
 }
@@ -1592,7 +1592,7 @@ input[type="checkbox"]:focus-visible {
 }
 
 .whitelist-explanation {
-  font-size:11px;
+  font-size:12px;
   color:var(--muted);
   line-height:1.9;
   border-left:2px solid var(--accent);
@@ -1634,7 +1634,7 @@ input[type="checkbox"]:focus-visible {
 
 .session-row small {
   display:block;
-  font-size:9px;
+  font-size:12px;
   color:var(--muted);
   margin-top:3px
 }
@@ -1713,7 +1713,7 @@ footer {
   display:flex;
   justify-content:space-between;
   gap:20px;
-  font-size:8px;
+  font-size:12px;
   color:var(--muted);
   letter-spacing:.7px;
   border-top:1px solid var(--ink);
@@ -1840,7 +1840,7 @@ footer a:hover {
     padding-left:12px
   }
   .archive-nav small {
-    font-size:8px;
+    font-size:12px;
     letter-spacing:.3px
   }
   .archive-nav span {
@@ -1892,7 +1892,7 @@ footer a:hover {
     font-size:20px
   }
   .persona-heading small {
-    font-size:8px
+    font-size:12px
   }
   .persona-avatar {
     display:none
@@ -1900,7 +1900,7 @@ footer a:hover {
   .persona-identity {
     grid-column:2;
     margin:6px 0;
-    font-size:11px
+    font-size:12px
   }
   .persona-tags {
     grid-column:2
@@ -1931,7 +1931,7 @@ footer a:hover {
     max-width:380px
   }
   .toolbar label>span {
-    font-size:8px
+    font-size:12px
   }
   .date-strip button {
     gap:12px
@@ -1954,7 +1954,7 @@ footer a:hover {
     letter-spacing:-.6px
   }
   .brand small {
-    font-size:8px;
+    font-size:12px;
     letter-spacing:1px;
     margin-top:5px
   }
@@ -2007,14 +2007,14 @@ footer a:hover {
     top:10px
   }
   .archive-nav small {
-    font-size:7px;
+    font-size:12px;
     letter-spacing:0
   }
   .archive-nav span {
-    font-size:10px
+    font-size:12px
   }
   .archive-nav b {
-    font-size:7px;
+    font-size:12px;
     line-height:11px;
     min-width:11px;
     margin-left:2px
@@ -2027,7 +2027,7 @@ footer a:hover {
     font-size:16px
   }
   .draft-status {
-    font-size:10px
+    font-size:12px
   }
   .toolbar {
     flex-wrap:wrap;
@@ -2056,11 +2056,11 @@ footer a:hover {
     font-size:12px
   }
   .toolbar label>span {
-    font-size:8px
+    font-size:12px
   }
   #job-status {
     order:0;
-    font-size:10px;
+    font-size:12px;
     max-width:190px
   }
   .today-layout {
@@ -2072,7 +2072,7 @@ footer a:hover {
     padding-bottom:20px
   }
   .dossier>.section-code {
-    font-size:7px;
+    font-size:12px;
     margin-bottom:12px
   }
   .date-display {
@@ -2083,31 +2083,31 @@ footer a:hover {
     letter-spacing:-4px
   }
   .date-display strong {
-    font-size:10px
+    font-size:12px
   }
   .date-display small {
-    font-size:9px
+    font-size:12px
   }
   .persona-heading h2 {
     font-size:19px
   }
   .persona-heading small {
-    font-size:7px
+    font-size:12px
   }
   .persona-identity {
-    font-size:10px
+    font-size:12px
   }
   .persona-tags span {
-    font-size:8px;
+    font-size:12px;
     padding:1px 5px
   }
   .live-kicker {
-    font-size:8px;
+    font-size:12px;
     letter-spacing:.2px;
     align-items:flex-start
   }
   .live-kicker>span:last-child {
-    font-size:7px
+    font-size:12px
   }
   .live-panel {
     min-height:0;
@@ -2119,18 +2119,18 @@ footer a:hover {
   }
   .live-detail {
     gap:8px;
-    font-size:10px
+    font-size:12px
   }
   .contact-status {
     padding:2px 6px
   }
   .day-brief {
-    font-size:10px;
+    font-size:12px;
     margin-top:16px;
     gap:8px
   }
   .day-events {
-    font-size:9px
+    font-size:12px
   }
   .rhythm-panel {
     padding:18px 0 14px
@@ -2141,7 +2141,7 @@ footer a:hover {
     gap:9px
   }
   .status-legend {
-    font-size:8px;
+    font-size:12px;
     gap:10px
   }
   .rhythm-bar {
@@ -2152,7 +2152,7 @@ footer a:hover {
     height:16px
   }
   .section-code {
-    font-size:8px;
+    font-size:12px;
     letter-spacing:.9px
   }
   .date-strip button {
@@ -2161,16 +2161,16 @@ footer a:hover {
     gap:2px
   }
   .date-strip .day-name {
-    font-size:8px
+    font-size:12px
   }
   .date-strip .day-number {
     font-size:20px
   }
   .week-strip-heading {
-    font-size:9px
+    font-size:12px
   }
   .week-strip-heading button {
-    font-size:10px
+    font-size:12px
   }
   .section-heading {
     gap:10px;
@@ -2180,20 +2180,20 @@ footer a:hover {
     font-size:16px
   }
   .heading-copy h2 small {
-    font-size:9px;
+    font-size:12px;
     margin-left:4px
   }
   .button-group {
     gap:5px
   }
   .button-group button {
-    font-size:10px;
+    font-size:12px;
     min-height:32px;
     padding:5px 8px
   }
   .ledger-head {
     grid-template-columns:65px minmax(0,1fr) 58px;
-    font-size:7px
+    font-size:12px
   }
   .timeline-row {
     grid-template-columns:65px minmax(0,1fr)
@@ -2203,7 +2203,7 @@ footer a:hover {
     padding:15px 0
   }
   .timeline-time small {
-    font-size:9px
+    font-size:12px
   }
   .timeline-row.current .timeline-time:before {
     left:-9px;
@@ -2216,21 +2216,21 @@ footer a:hover {
     padding:15px 0
   }
   .card-meta {
-    font-size:9px;
+    font-size:12px;
     gap:6px
   }
   .badge {
-    font-size:8px;
+    font-size:12px;
     padding:0 5px
   }
   .current-label {
-    font-size:7px
+    font-size:12px
   }
   .card-title {
     font-size:12px
   }
   .card p {
-    font-size:10px
+    font-size:12px
   }
   .actions {
     gap:0
@@ -2245,7 +2245,7 @@ footer a:hover {
     height:13px
   }
   .hint {
-    font-size:10px
+    font-size:12px
   }
   .intro-line {
     display:block;
@@ -2255,10 +2255,10 @@ footer a:hover {
     font-size:25px
   }
   .intro-line p {
-    font-size:11px
+    font-size:12px
   }
   .intro-line>button {
-    font-size:11px;
+    font-size:12px;
     margin-top:16px
   }
   .profile-details {
@@ -2268,7 +2268,7 @@ footer a:hover {
     font-size:15px
   }
   .profile-details summary small {
-    font-size:9px
+    font-size:12px
   }
   .profile-layout {
     gap:24px
@@ -2300,10 +2300,10 @@ footer a:hover {
   .month-day {
     min-height:65px;
     padding:5px 3px;
-    font-size:11px
+    font-size:12px
   }
   .month-event {
-    font-size:7px
+    font-size:12px
   }
   .event-cards {
     display:block
@@ -2339,19 +2339,19 @@ footer a:hover {
     font-size:12px
   }
   .toggle-row p {
-    font-size:10px
+    font-size:12px
   }
   .whitelist-explanation {
-    font-size:10px
+    font-size:12px
   }
   .inline input {
-    font-size:10px
+    font-size:12px
   }
   .settings-layout {
     gap:22px
   }
   label {
-    font-size:10px
+    font-size:12px
   }
   input:not([type="checkbox"]),select,textarea {
     font-size:12px;
@@ -2363,28 +2363,212 @@ footer a:hover {
   }
   .empty {
     padding:36px 12px;
-    font-size:11px
+    font-size:12px
   }
   .empty strong {
     font-size:16px
   }
   .logs {
     padding:12px;
-    font-size:10px
+    font-size:12px
   }
   dialog {
     padding:21px
   }
   .dialog-actions button {
-    font-size:11px
+    font-size:12px
   }
   footer {
     flex-direction:column;
     gap:7px;
-    font-size:7px;
+    font-size:12px;
     padding:14px 0 20px;
     margin-top:36px
   }
+}
+
+/* Compact working layout and editable availability controls. */
+.masthead {height:64px}
+.brand strong {font-size:21px}
+.brand small {margin-top:4px;letter-spacing:.8px}
+.archive-nav {padding:6px 0;gap:20px;overflow-x:auto}
+.archive-nav button {min-width:105px;min-height:44px;padding-left:12px}
+.archive-nav button:before {top:18px}
+.archive-nav button.active:before {top:6px;height:34px}
+.archive-nav small {letter-spacing:.2px;margin-bottom:0}
+.archive-nav span {font-size:13px}
+.archive-nav b {font-size:12px;min-width:19px;line-height:18px}
+.page-header {padding:10px 0;gap:14px;flex-wrap:wrap}
+.page-caption {letter-spacing:0}
+.toolbar {padding:9px 0;margin-bottom:16px;gap:20px}
+.toolbar label>span {letter-spacing:.3px;margin-bottom:1px}
+.toolbar-end button {min-height:40px;padding:8px 15px}
+.toolbar input,.toolbar select {margin-top:0}
+.today-layout {grid-template-columns:210px minmax(0,1fr);gap:26px}
+.dossier {padding-right:22px}
+.date-display {margin:10px 0 18px}
+.date-display>span {font-size:68px}
+.availability-diagram {height:140px}
+.orbit-ring {width:98px;height:98px}
+.diagram-tick {height:85px}
+.live-panel {display:grid;grid-template-columns:minmax(0,1fr) minmax(250px,.86fr);gap:0 22px;min-height:0;padding-bottom:13px}
+.live-kicker {grid-column:1/-1;font-size:12px;letter-spacing:0}
+.live-panel h2 {grid-column:1;font-size:30px;margin:10px 0 8px;line-height:1.3}
+.live-detail {grid-column:1;gap:9px}
+.day-brief {grid-column:1;margin-top:8px;gap:8px}
+.day-events {grid-column:1;margin-top:6px}
+.contact-metrics {grid-column:2;grid-row:2/6;display:grid;align-content:center;gap:6px;border-left:1px solid var(--line);padding:10px 0 0 18px}
+.contact-metrics>div {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 8px;align-items:baseline;font-size:12px;min-width:0}
+.contact-metrics span {color:var(--muted)}
+.contact-metrics strong {font-size:15px;font-weight:500;font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
+.contact-metrics small {grid-column:1/-1;color:var(--muted);font-size:12px}
+.contact-metrics>div:not(:first-child) small {display:none}
+.rhythm-panel {padding:11px 0 9px}
+.rhythm-heading {margin-bottom:7px;gap:7px}
+.status-legend {gap:10px;font-size:12px}
+.week-strip-heading {margin:3px 0 6px}
+.date-strip button {padding:5px 6px;gap:9px;min-height:38px}
+.date-strip .day-number {font-size:19px}
+.section-heading {margin:18px 0 10px}
+.heading-copy h2 {margin-top:2px}
+.coverage-status {font-size:12px;color:var(--free);margin:8px 0;line-height:1.6;overflow-wrap:anywhere}
+.coverage-status.invalid {color:var(--danger);border-left:2px solid var(--danger);padding-left:9px}
+.timeline-time {padding:13px 0}
+.card {padding:12px 0;gap:10px}
+.card-title {font-size:15px;margin-top:4px}
+.card-meta {font-size:12px;gap:7px}
+.badge,.card-meta>small {font-size:12px}
+.badge.locked {border-style:dashed}
+.card p {font-size:12px;line-height:1.65}
+.actions {gap:2px;max-width:152px;flex-wrap:wrap;justify-content:flex-end}
+.actions button {min-height:36px;min-width:34px;padding:8px}
+.button-group button {min-height:38px;font-size:12px}
+.section-code {font-size:12px;letter-spacing:.55px}
+.hint,.subtle,label,.logs,.toggle-row p,.whitelist-explanation {font-size:12px}
+input:not([type="checkbox"]),select,textarea {font-size:13px;min-height:40px}
+.model-refresh {display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.model-refresh .hint {margin:0}
+#job-status {max-width:280px;font-size:12px}
+#job-status progress {display:block;width:100%;height:5px;margin-top:4px;accent-color:var(--accent)}
+.profile-layout {grid-template-columns:minmax(245px,.7fr) minmax(0,1.5fr);gap:24px}
+.week-matrix {display:grid;grid-template-columns:24px repeat(7,minmax(0,1fr));gap:5px;margin-top:16px;border-bottom:1px solid var(--line);padding-bottom:10px;overflow:hidden}
+.matrix-column {min-width:0}
+.matrix-column>button {width:100%;padding:4px 0;min-height:32px;font-size:12px;border:0}
+.matrix-column.selected>button {color:var(--on-ink);background:var(--ink)}
+.matrix-track {height:288px;position:relative;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:repeating-linear-gradient(to bottom,transparent 0 calc(25% - 1px),var(--line) calc(25% - 1px) 25%)}
+.matrix-slot {position:absolute;left:0;right:0;display:block;width:100%;min-height:0;padding:3px 3px;border:0;border-left:2px solid currentColor;overflow:hidden;text-align:left;font-size:12px;line-height:1.35;background:var(--wash)}
+.matrix-slot span {overflow-wrap:anywhere;pointer-events:none}
+.matrix-slot.free {color:var(--free);background:color-mix(in srgb,var(--free) 13%,var(--paper))}
+.matrix-slot.slow {color:var(--slow);background:color-mix(in srgb,var(--slow) 15%,var(--paper))}
+.matrix-slot.busy {color:var(--busy);background:color-mix(in srgb,var(--busy) 18%,var(--paper))}
+.matrix-slot:hover {filter:brightness(.94);outline:1px solid currentColor;outline-offset:-1px;z-index:2}
+.boundary-handle {position:absolute;right:0;width:14px;height:12px;min-height:12px;transform:translateY(-50%);padding:0;border:0;background:transparent;cursor:ns-resize;z-index:3;touch-action:none}
+.boundary-handle:after {content:'';display:block;width:100%;height:2px;background:var(--line);opacity:.7}
+.boundary-handle:hover:after,.boundary-handle:focus-visible:after,.boundary-handle.dragging:after {height:4px;background:var(--accent);opacity:1}
+.matrix-scale {display:flex;flex-direction:column;justify-content:space-between;margin-top:30px;font-size:12px;color:var(--muted);height:290px;font-variant-numeric:tabular-nums}
+.diagnostic-summary {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}
+.diagnostic-summary article {padding:15px;min-width:0}
+.diagnostic-summary span {display:block;font-size:12px;color:var(--muted);margin-bottom:7px}
+.diagnostic-summary strong {display:block;font-size:15px;font-weight:500;overflow-wrap:anywhere}
+.diagnostic-filter {max-width:520px}
+.diagnostic-sessions {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:20px}
+.diagnostic-session {padding:20px;min-width:0}
+.diagnostic-session .section-heading {margin:0 0 7px;align-items:flex-start}
+.diagnostic-session h3 {overflow-wrap:anywhere}
+.diagnostic-umo {font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.diagnostic-session dl {margin:16px 0 0;display:grid;gap:0}
+.diagnostic-session dl>div {display:grid;grid-template-columns:110px minmax(0,1fr);border-top:1px solid var(--soft-line);padding:8px 0;font-size:12px;gap:10px}
+.diagnostic-session dt {color:var(--muted)}
+.diagnostic-session dd {margin:0;overflow-wrap:anywhere}
+.diagnostic-error {margin-top:12px;overflow-wrap:anywhere;font-size:12px}
+#boundary-form>label {margin-top:20px}
+#boundary-context {margin:12px 0}
+@media(min-width:1500px) {.today-layout {grid-template-columns:230px minmax(0,1fr);gap:32px}}
+@media(max-width:1100px) {
+  .archive-nav {gap:10px}
+  .today-layout {grid-template-columns:180px minmax(0,1fr);gap:22px}
+  .live-panel {grid-template-columns:minmax(0,1fr) minmax(220px,.9fr);gap:0 16px}
+  .live-panel h2 {font-size:27px}
+  .contact-metrics {padding-left:12px}
+  .profile-layout {grid-template-columns:1fr}
+  .profile-details .form-grid {grid-template-columns:repeat(2,minmax(0,1fr))}
+  .diagnostic-summary {grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:800px) {
+  .masthead {height:60px}
+  .today-layout {grid-template-columns:1fr;gap:14px}
+  .dossier {padding-bottom:12px;grid-template-columns:120px minmax(0,1fr);gap:0 18px}
+  .dossier>.section-code {display:none}
+  .date-display {grid-row:1/4}
+  .date-display>span {font-size:54px}
+  .persona-heading {grid-row:1}
+  .persona-identity {margin:3px 0;font-size:12px}
+  .persona-tags span {font-size:12px}
+  .live-panel {grid-template-columns:minmax(0,1fr) minmax(235px,.9fr)}
+  .diagnostic-sessions {grid-template-columns:1fr}
+  .page-caption {display:block;font-size:12px;flex:1}
+}
+@media(max-width:520px) {
+  .shell {padding:0 14px}
+  .aside-status {font-size:0}
+  .brand strong {font-size:18px}
+  .brand small {font-size:12px;letter-spacing:0}
+  .archive-nav {gap:6px;scrollbar-width:thin}
+  .archive-nav button {min-width:105px;padding:4px 0 4px 10px;min-height:45px}
+  .archive-nav small,.archive-nav span {font-size:12px}
+  .archive-nav button.active:before {height:32px;top:7px}
+  .page-header {gap:6px;padding:10px 0}
+  .page-caption {width:100%;flex:auto;order:3}
+  .toolbar {gap:10px;padding:9px 0 12px;margin-bottom:14px}
+  .toolbar label>span {font-size:12px}
+  .toolbar-end {gap:10px}
+  .toolbar-end button {font-size:12px;min-height:40px}
+  #job-status {max-width:170px;font-size:12px}
+  .dossier {grid-template-columns:116px minmax(0,1fr);gap:0 13px}
+  .date-display {gap:8px}
+  .date-display small,.date-display strong,.persona-heading small {font-size:12px}
+  .persona-heading h2 {font-size:19px}
+  .live-panel {display:block;padding-bottom:13px}
+  .live-kicker {font-size:12px}
+  .live-kicker>span:last-child {display:none}
+  .live-panel h2 {font-size:27px;margin:10px 0}
+  .live-detail,.day-brief,.day-events {font-size:12px}
+  .contact-metrics {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-left:0;border-top:1px solid var(--soft-line);margin-top:12px;padding:10px 0 0;gap:8px}
+  .contact-metrics>div {display:block}
+  .contact-metrics span,.contact-metrics small {display:block;font-size:12px;line-height:1.6}
+  .contact-metrics strong {display:block;font-size:14px;text-align:left;line-height:1.5}
+  .contact-metrics>div:not(:first-child) small {display:none}
+  .rhythm-heading {gap:7px}
+  .status-legend {font-size:12px;gap:5px 9px}
+  .date-strip button {padding:5px 1px;gap:0}
+  .date-strip .day-name {font-size:12px}
+  .date-strip .day-number {font-size:19px}
+  .ledger-head {grid-template-columns:58px minmax(0,1fr) 70px;font-size:12px}
+  .timeline-row {grid-template-columns:58px minmax(0,1fr)}
+  .timeline-time {font-size:14px}
+  .timeline-time small {font-size:12px}
+  .card {gap:8px;padding:12px 0}
+  .card-title {font-size:14px}
+  .card-meta,.badge,.card p,.card-meta>small {font-size:12px}
+  .actions {max-width:70px;min-width:70px;gap:0;display:grid;grid-template-columns:repeat(2,34px)}
+  .actions button {min-height:36px;min-width:34px;padding:8px}
+  .event-cards .actions {display:flex;flex-direction:column;min-width:34px;max-width:34px}
+  .heading-copy h2 {font-size:17px}
+  .button-group button {font-size:12px;min-height:38px;padding:6px 9px}
+  .section-heading {flex-wrap:wrap;margin:16px 0 10px}
+  .matrix-track {height:320px}
+  .matrix-scale {height:322px}
+  .week-matrix {gap:3px;grid-template-columns:20px repeat(7,minmax(0,1fr))}
+  .matrix-slot {padding:2px;font-size:12px}
+  .matrix-column>button {font-size:12px}
+  .profile-details .form-grid {grid-template-columns:1fr}
+  .diagnostic-summary {gap:9px}
+  .diagnostic-summary article {padding:12px}
+  .diagnostic-summary strong {font-size:14px}
+  .diagnostic-session {padding:15px}
+  .diagnostic-session dl>div {grid-template-columns:96px minmax(0,1fr)}
+  .month-event {font-size:12px}
+  footer {font-size:12px}
 }
 
 @media(prefers-reduced-motion:reduce) {

@@ -14,6 +14,8 @@ DEFAULTS = {
     "whitelist_enabled": False,
     "whitelist": [],
     "provider_id": "",
+    "schedule_provider_id": "",
+    "reply_provider_id": "",
     "timezone": "Asia/Shanghai",
     "slow_min_seconds": 60,
     "slow_max_seconds": 180,
@@ -60,8 +62,8 @@ def minute(value: str, *, end=False) -> int:
     return hour * 60 + part
 
 
-def validate_slots(rows, *, weekly=False):
-    if not isinstance(rows, list) or not 1 <= len(rows) <= 120:
+def _normalise_slots(rows, *, weekly=False, allow_empty=False):
+    if not isinstance(rows, list) or not (0 if allow_empty else 1) <= len(rows) <= 120:
         raise ValueError("日程应包含 1～120 个时间段")
     result = []
     for row in rows:
@@ -77,13 +79,29 @@ def validate_slots(rows, *, weekly=False):
         if not title:
             raise ValueError("请填写日程名称")
         clean = {"start": row["start"], "end": row["end"], "status": state,
-                 "title": title, "note": text(row.get("note", ""), 800)}
+                 "title": title, "note": text(row.get("note", ""), 800),
+                 "locked": boolean(row.get("locked", False))}
+        delay_keys = ("slow_min_seconds", "slow_max_seconds")
+        if any(key in row for key in delay_keys):
+            if not all(key in row for key in delay_keys):
+                raise ValueError("时段最短和最长延迟必须一起设置")
+            low, high = (row[key] for key in delay_keys)
+            if any(type(value) is not int or not 5 <= value <= 7200 for value in (low, high)):
+                raise ValueError("时段延迟应为 5～7200 秒的整数")
+            if low > high:
+                raise ValueError("时段最短延迟不能超过最长延迟")
+            clean.update(zip(delay_keys, (low, high)))
         if weekly:
             days = row.get("days")
             if not isinstance(days, list) or not days or any(type(d) is not int or d not in range(1, 8) for d in days):
                 raise ValueError("days 应为周一到周日的数字数组（1～7）")
             clean["days"] = sorted(set(days))
         result.append(clean)
+    return result
+
+
+def validate_slots(rows, *, weekly=False):
+    result = _normalise_slots(rows, weekly=weekly)
     for day in range(1, 8) if weekly else [None]:
         selected = sorted((r for r in result if day is None or day in r["days"]), key=lambda r: r["start"])
         cursor = 0
@@ -95,6 +113,67 @@ def validate_slots(rows, *, weekly=False):
         if cursor != 1440:
             raise ValueError("日程必须完整覆盖 00:00～24:00")
     return sorted(result, key=lambda r: (r["start"], r.get("days", [0])))
+
+
+def slow_bounds(slot, settings):
+    """Use a validated slot's delay override, otherwise the global interval."""
+    return (slot.get("slow_min_seconds", settings["slow_min_seconds"]),
+            slot.get("slow_max_seconds", settings["slow_max_seconds"]))
+
+
+def merge_locked_slots(generated, previous, *, weekly=False):
+    """Overlay prior locked slots on a complete candidate without moving locks.
+
+    `previous` may be a complete schedule or a list of locked fragments. All
+    returned rows are independently validated. Weekly schedules are merged per
+    weekday, then identical rows are grouped back into a shared `days` list.
+    """
+    candidates = validate_slots(generated, weekly=weekly)
+    locks = [row for row in _normalise_slots([] if previous is None else previous,
+                                           weekly=weekly, allow_empty=True)
+             if row["locked"]]
+
+    def clock(value):
+        return f"{value // 60:02d}:{value % 60:02d}"
+
+    def merge_day(day_rows, day_locks):
+        day_locks = sorted(day_locks, key=lambda row: row["start"])
+        cursor = 0
+        for row in day_locks:
+            if minute(row["start"]) < cursor:
+                raise ValueError("锁定时段不能重叠")
+            cursor = minute(row["end"], end=True)
+        result = [copy.deepcopy(row) for row in day_locks]
+        for row in day_rows:
+            start, end = minute(row["start"]), minute(row["end"], end=True)
+            cursor = start
+            for lock in day_locks:
+                left, right = minute(lock["start"]), minute(lock["end"], end=True)
+                if right <= cursor:
+                    continue
+                if left >= end:
+                    break
+                if cursor < left:
+                    result.append({**row, "start": clock(cursor), "end": clock(left)})
+                cursor = max(cursor, right)
+                if cursor >= end:
+                    break
+            if cursor < end:
+                result.append({**row, "start": clock(cursor), "end": clock(end)})
+        return sorted(result, key=lambda row: row["start"])
+
+    if not weekly:
+        return validate_slots(merge_day(candidates, locks))
+    grouped = {}
+    for weekday in range(1, 8):
+        select = lambda rows: [{k: copy.deepcopy(v) for k, v in row.items() if k != "days"}
+                               for row in rows if weekday in row["days"]]
+        for row in merge_day(select(candidates), select(locks)):
+            key = json.dumps(row, ensure_ascii=False, sort_keys=True)
+            if key not in grouped:
+                grouped[key] = {**row, "days": []}
+            grouped[key]["days"].append(weekday)
+    return validate_slots(list(grouped.values()), weekly=True)
 
 
 def validate_profile(obj):
@@ -173,7 +252,7 @@ def validate_settings(payload, previous):
     for key in ("enabled", "whitelist_enabled", "search_enabled"):
         if key in payload:
             result[key] = boolean(payload[key])
-    for key in ("provider_id", "timezone", "tavily_api_key"):
+    for key in ("provider_id", "schedule_provider_id", "reply_provider_id", "timezone", "tavily_api_key"):
         if key in payload:
             result[key] = text(payload[key], 500)
     ZoneInfo(result["timezone"])
@@ -203,7 +282,8 @@ class Store:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "state.json"
-        self.data = {"settings": copy.deepcopy(DEFAULTS), "personas": {}, "sessions": {}, "queues": {}, "logs": []}
+        self.data = {"settings": copy.deepcopy(DEFAULTS), "personas": {}, "sessions": {}, "queues": {}, "logs": [],
+                     "expired_messages": 0}
         if self.path.exists():
             # Do not overwrite a damaged file with empty data.
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -212,6 +292,7 @@ class Store:
             self.data.update(loaded)
             self.data["settings"] = validate_settings(loaded.get("settings", {}), DEFAULTS)
         for queue in self.data["queues"].values():
+            queue.setdefault("expired", 0)
             if queue.get("delivery") == "sending":
                 queue["delivery"] = "uncertain"
                 queue["reason"] = "上次发送期间进程退出，需人工核对是否已送达"
@@ -238,7 +319,8 @@ class Store:
             queue = None
         if queue is None:
             queue = {"cid": cid, "persona_key": persona_key, "created_at": now,
-                     "due": due, "messages": [], "dropped": 0, "delivery": "pending", "reason": ""}
+                     "due": due, "messages": [], "dropped": 0, "expired": 0,
+                     "delivery": "pending", "reason": ""}
             self.data["queues"][umo] = queue
         # Never postpone a slow reply just because another message arrives.
         if state == "busy":
@@ -251,8 +333,45 @@ class Store:
         if excess:
             queue["messages"] = queue["messages"][excess:]
             queue["dropped"] += excess
+        queue["created_at"] = min(row["at"] for row in queue["messages"])
         self.save()
         return queue
+
+    def prune_expired(self, now, umo=None):
+        """Expire individual messages, keeping recent arrivals and active sends.
+
+        Returns the number removed in this call and persists any change. The
+        queue counter survives partial cleanup; the global counter also records
+        messages from queues which become empty and are removed.
+        """
+        cutoff = now - self.settings["queue_expire_hours"] * 3600
+        targets = list(self.data["queues"]) if umo is None else [umo]
+        total, changed = 0, False
+        for origin in targets:
+            queue = self.data["queues"].get(origin)
+            if queue is None or queue["delivery"] == "sending":
+                continue
+            messages = queue["messages"]
+            remaining = [row for row in messages if row["at"] > cutoff]
+            expired = len(messages) - len(remaining)
+            total += expired
+            if expired:
+                queue["expired"] = queue.get("expired", 0) + expired
+                queue["messages"] = remaining
+                changed = True
+            if not remaining:
+                self.data["queues"].pop(origin, None)
+                changed = True
+                continue
+            created_at = min(row["at"] for row in remaining)
+            if queue["created_at"] != created_at:
+                queue["created_at"] = created_at
+                changed = True
+        if total:
+            self.data["expired_messages"] = self.data.get("expired_messages", 0) + total
+        if changed:
+            self.save()
+        return total
 
     def finish_batch(self, umo, ids):
         queue = self.data["queues"].get(umo)
@@ -262,6 +381,7 @@ class Store:
         if queue["messages"]:
             queue["delivery"] = "pending"
             queue["reason"] = ""
+            queue["created_at"] = min(row["at"] for row in queue["messages"])
         else:
             self.data["queues"].pop(umo, None)
         self.save()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 from datetime import datetime
@@ -80,23 +81,86 @@ def public_calendar(profile, year):
     return output, warnings
 
 
+async def provider_meta(provider):
+    """Read both synchronous and asynchronous provider metadata."""
+    getter = getattr(provider, "meta", None)
+    meta = getter() if callable(getter) else getter
+    return await meta if inspect.isawaitable(meta) else meta
+
+
+async def is_chat_provider(provider):
+    """Recognize chat providers without depending on a particular SDK enum.
+
+    AstrBot chat providers expose text_chat. Explicit non-chat metadata wins
+    over a similarly named method inherited by an adapter or test double.
+    """
+    meta = await provider_meta(provider)
+    kinds = []
+    for value in (field(meta, "type"), field(meta, "provider_type"),
+                  field(provider, "provider_type")):
+        for candidate in (getattr(value, "name", None), getattr(value, "value", None), value):
+            if isinstance(candidate, str):
+                kinds.append(candidate.lower().replace("-", "_").rsplit(".", 1)[-1])
+    if any(any(token in kind for token in ("embedding", "speech", "rerank")) or
+           kind in {"tts", "stt", "asr", "text_to_audio", "audio_to_text"} for kind in kinds):
+        return False
+    if any(kind in {"chat", "chat_completion", "text_generation", "llm"} or
+           kind.endswith("_chat_completion") for kind in kinds):
+        return True
+    return callable(getattr(provider, "text_chat", None))
+
+
 class Generator:
     def __init__(self, context, store):
         self.context, self.store = context, store
 
-    async def provider_id(self, umo=""):
-        selected = self.store.settings["provider_id"]
+    async def provider_id(self, umo="", purpose="schedule"):
+        if purpose not in {"schedule", "reply"}:
+            raise ValueError("模型用途应为 schedule 或 reply")
+        selected = (self.store.settings.get(f"{purpose}_provider_id", "") or
+                    self.store.settings.get("provider_id", ""))
         if selected:
+            # Validate explicit IDs when the installed AstrBot exposes provider
+            # lookup. Never echo provider configuration or exception contents.
+            getter = getattr(self.context, "get_provider_by_id", None)
+            try:
+                if getter:
+                    provider = getter(selected)
+                    provider = await provider if inspect.isawaitable(provider) else provider
+                    if provider is None or not await is_chat_provider(provider):
+                        raise ValueError("missing provider")
+                else:
+                    getter = getattr(self.context, "get_all_providers", None)
+                    if getter:
+                        providers = getter()
+                        providers = await providers if inspect.isawaitable(providers) else providers
+                        found = False
+                        for provider in providers:
+                            try:
+                                matches = field(await provider_meta(provider), "id") == selected
+                            except Exception:
+                                # One broken, unrelated adapter must not make a
+                                # different selected chat provider unavailable.
+                                continue
+                            if matches:
+                                found = await is_chat_provider(provider)
+                                break
+                        if not found:
+                            raise ValueError("missing provider")
+            except Exception:
+                raise ValueError("所选聊天模型不可用，请重新选择；不支持向量、语音或重排模型") from None
             return selected
         if umo:
-            return await self.context.get_current_chat_provider_id(umo=umo)
+            current = await self.context.get_current_chat_provider_id(umo=umo)
+            if current:
+                return current
         provider = await self.context.get_using_provider_async()
         if not provider:
             raise ValueError("请先在 AstrBot 配置聊天模型，或在插件设置中选择模型")
         return provider.meta().id
 
-    async def generate(self, system, payload, umo="", *, contexts=None):
-        provider_id = await self.provider_id(umo)
+    async def generate(self, system, payload, umo="", *, contexts=None, purpose="schedule"):
+        provider_id = await self.provider_id(umo, purpose=purpose)
         response = await asyncio.wait_for(self.context.llm_generate(
             chat_provider_id=provider_id, system_prompt=system,
             prompt=json.dumps(payload, ensure_ascii=False), contexts=contexts or []),
@@ -170,4 +234,4 @@ class Generator:
 可简短说明刚才在做什么，不能声称看过未提供的图片、听过语音或执行过工具操作。
 当前半忙时回复更短。只输出发给用户的纯文本。""",
             {"queued_messages": messages, "today_summary": schedule["summary"], "current_activity": slot},
-            umo, contexts=contexts)
+            umo, contexts=contexts, purpose="reply")

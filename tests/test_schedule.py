@@ -454,7 +454,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.store.settings["tavily_api_key"],"secret-test-only")
 
     async def test_registered_web_routes_use_plugin_prefix(self):
-        self.assertEqual(len(self.ctx.routes),7)
+        self.assertEqual({r[0].rsplit('/',1)[-1] for r in self.ctx.routes},
+                         {'state','settings','detail','generate','job','save','queue','providers','diagnostics'})
         self.assertTrue(all(r[0].startswith('/'+NAME+'/') for r in self.ctx.routes))
 
     async def test_cached_schedule_is_stable_and_no_extra_model_calls(self):
@@ -492,6 +493,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plan("busy")
         await self.plugin.intercept_message(FakeEvent())
         self.plugin.store.data["queues"][UMO]["created_at"]=time.time()-80*3600
+        for row in self.plugin.store.data["queues"][UMO]["messages"]:
+            row["at"]=self.plugin.store.data["queues"][UMO]["created_at"]
         self.plugin.store.settings["enabled"]=False
         await self.plugin.tick()
         self.assertEqual(self.plugin.store.data["queues"],{})
@@ -515,6 +518,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plan("busy")
         await self.plugin.intercept_message(FakeEvent())
         self.plugin.store.data["queues"][UMO]["created_at"]=time.time()-80*3600
+        for row in self.plugin.store.data["queues"][UMO]["messages"]:
+            row["at"]=self.plugin.store.data["queues"][UMO]["created_at"]
         self.plan("free")
         await self.tick()
         self.assertNotIn(UMO,self.plugin.store.data["queues"])

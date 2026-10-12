@@ -19,7 +19,7 @@
 <div class="shell">
   <header class="masthead">
     <a class="brand" href="#" aria-label="角色日程首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span><strong>PERSONA / LIFE</strong><small>角色日程 · 生活档案系统</small></span></a>
-    <div class="system-id"><span>ASTRBOT EXTENSION</span><b>PS — 02</b></div>
+    <div class="system-id"><span>ASTRBOT EXTENSION</span><b>PS — 03</b></div>
     <div class="aside-status is-off"><span class="dot"></span><span id="enabled-label">插件尚未启用</span></div>
     <button id="refresh" class="icon-button" aria-label="刷新"><svg><use href="#i-refresh"/></svg></button>
   </header>
@@ -29,14 +29,15 @@
     <button data-tab="calendar" aria-pressed="false"><small>03 / EVENTS</small><span>节日与活动</span></button>
     <button data-tab="queues" aria-pressed="false"><small>04 / MESSAGES</small><span>待回留言 <b id="queue-count">0</b></span></button>
     <button data-tab="settings" aria-pressed="false"><small>05 / CONTROL</small><span>运行设置</span></button>
+    <button data-tab="diagnostics" aria-pressed="false"><small>06 / HEALTH</small><span>运行诊断</span></button>
   </nav>
   <main>
-    <div class="page-header"><h1 id="page-title">日程总览</h1><span class="page-caption">PERSONA SCHEDULE / 每个角色都有自己的生活轨迹</span><span id="draft-status" class="draft-status" role="status"></span></div>
+    <div class="page-header"><h1 id="page-title">日程总览</h1><span class="page-caption" id="last-updated">正在连接 AstrBot</span><span id="draft-status" class="draft-status" role="status"></span></div>
     <div id="notice" role="status" hidden></div>
     <section class="toolbar" id="persona-toolbar" aria-label="人设与日期">
       <label class="persona-select"><span>角色档案 / PERSONA</span><select id="persona"><option value="">选择 AstrBot 人设</option></select></label>
       <label class="date-select"><span>查阅日期 / DATE</span><input id="date" type="date" min="1970-01-01" max="2100-12-31"></label>
-      <div class="toolbar-end"><span id="job-status" aria-live="polite"></span><button id="generate" class="primary"><svg><use href="#i-spark"/></svg>生成这一天</button></div>
+      <div class="toolbar-end"><div id="job-status" aria-live="polite"></div><button id="generate" class="primary"><svg><use href="#i-spark"/></svg>生成这一天</button></div>
     </section>
     <section id="today" class="tab">
       <div class="today-layout">
@@ -56,6 +57,7 @@
             <div class="live-kicker"><span><i class="dot"></i> <span id="hero-current">等待日程</span></span><span id="live-date-label">DAILY OBSERVATION</span></div>
             <h2 id="current-title">等待生成日程</h2>
             <div class="live-detail"><span id="current-state" class="contact-status">尚无安排</span><p id="current-note">选择人设后生成日程。</p></div>
+            <div class="contact-metrics"><div><span>下次可联系</span><strong id="next-contact">—</strong><small id="contact-countdown">等待日程</small></div><div><span>当前慢回范围</span><strong id="slow-range">—</strong><small>每个活动可单独调整</small></div><div><span>本角色待回留言</span><strong id="persona-pending">0 条</strong><small id="persona-send-state">暂无待回消息</small></div></div>
             <div class="day-brief"><span>摘要 /</span><p id="day-summary">这一天还没有安排</p></div><div id="day-events" class="day-events"></div>
           </section>
           <section class="rhythm-panel" aria-label="全天回复节奏">
@@ -64,7 +66,7 @@
           </section>
           <div class="week-strip-heading"><span id="journal-month">本周记录</span><button id="jump-today" class="text-button">回到今天 ↗</button></div><div id="date-strip" class="date-strip" aria-label="本周日期"></div>
           <div class="section-heading"><div class="heading-copy"><span class="section-code">SCHEDULE INDEX</span><h2>当天安排 <small id="day-count"></small></h2></div><div class="button-group"><button id="add-day">＋ 添加时段</button><button id="save-day" class="primary">保存日程</button></div></div>
-          <div class="ledger-head" aria-hidden="true"><span>时间 / TIME</span><span>活动 / ACTIVITY</span><span>操作</span></div><div id="day-list" class="schedule-ledger"></div><p class="hint">日程完整覆盖 24 小时。忙碌时暂不回复，恢复可联系后参考这段时间的留言补回一句。</p>
+          <div id="day-validation" class="coverage-status" role="status"></div><div class="ledger-head" aria-hidden="true"><span>时间 / TIME</span><span>活动 / ACTIVITY</span><span>操作</span></div><div id="day-list" class="schedule-ledger"></div><p class="hint">日程完整覆盖 24 小时。锁定时段会在重新生成时保留。忙碌结束后参考期间留言补回一句。</p>
         </div>
       </div>
     </section>
@@ -73,7 +75,7 @@
       <div class="profile-layout"><details class="profile-details paper-panel" open><summary><span>档案资料 <small id="profile-preview">展开编辑世界观与生活习惯</small></span><span class="details-arrow">＋</span></summary><div class="form-grid" id="profile-form">
         <label>世界观类型<select id="world-type"><option value="real">现实世界</option><option value="fanfiction">同人世界</option><option value="original">自创世界</option></select></label><label>世界 / 作品名称<input id="world-name" placeholder="现实世界、原作名、王国名"></label><label>关联国家 / 地区<input id="countries" placeholder="CN, JP；无关联留空"></label><label>角色时区<input id="persona-timezone" placeholder="Asia/Tokyo"></label><label class="wide">职业与身份<input id="identity" placeholder="按人设填写，不限学生"></label><label class="wide">生活习惯<textarea id="lifestyle" rows="3"></textarea></label><label class="wide">文化、节庆与历法依据<textarea id="calendar-notes" rows="3" placeholder="可填写虚构历法如何映射到现实日期"></textarea></label>
       </div><p class="hint">保存档案或周表会让旧活动与日程失效；重新分析会重建全部安排。</p></details>
-      <div class="routine-panel"><div class="section-heading"><div class="heading-copy"><span class="section-code">WEEKLY SCHEDULE</span><h2>基础周表 <small id="week-count"></small></h2></div><div class="button-group"><button id="add-week">＋ 添加</button><button id="save-profile" class="primary">保存档案与周表</button></div></div><div class="filter-tabs" id="week-filter" aria-label="筛选周表"><button class="active" data-week-filter="all" aria-pressed="true">全部</button><button data-week-filter="weekday" aria-pressed="false">工作日</button><button data-week-filter="weekend" aria-pressed="false">周末</button></div><div id="week-list" class="cards weekly-cards"></div></div></div>
+      <div class="routine-panel"><div class="section-heading"><div class="heading-copy"><span class="section-code">WEEKLY SCHEDULE</span><h2>基础周表 <small id="week-count"></small></h2></div><div class="button-group"><button id="add-week">＋ 添加</button><button id="save-profile" class="primary">保存档案与周表</button></div></div><div id="week-matrix" class="week-matrix" aria-label="每周 7 天时间条"></div><p class="hint">点击列标题筛选某天；拖动时段边界调整相邻活动，键盘方向键每次调整 5 分钟，也可点击「调整边界」。单日修改不会影响其他天。</p><div class="filter-tabs" id="week-filter" aria-label="筛选周表"><button class="active" data-week-filter="all" aria-pressed="true">全部</button><button data-week-filter="weekday" aria-pressed="false">工作日</button><button data-week-filter="weekend" aria-pressed="false">周末</button></div><div id="week-validation" class="coverage-status" role="status"></div><div id="week-list" class="cards weekly-cards"></div></div></div>
     </section>
     <section id="calendar" class="tab" hidden>
       <div class="intro-line"><div><span class="section-code">CULTURE / WORLD EVENTS</span><h2>节日与活动档案</h2><p>按人设的文化与世界观安排真实节庆、原作事件和自创活动。</p></div><button id="generate-calendar"><svg><use href="#i-spark"/></svg>重新生成全年活动</button></div>
@@ -81,18 +83,23 @@
       <div class="event-index"><div class="section-heading"><div class="heading-copy"><span class="section-code">ANNUAL EVENT INDEX</span><h2>年度活动 <small id="event-count"></small></h2></div><div class="button-group"><button id="add-event">＋ 添加</button><button id="save-calendar" class="primary">保存活动</button></div></div><p class="hint">休假会调整常规作息；回复速度由当天日程决定。修改活动后需重新生成当天。</p><div id="calendar-notices" class="subtle"></div><div id="event-list" class="cards event-cards"></div></div></div>
     </section>
     <section id="queues" class="tab" hidden>
-      <div class="intro-line"><div><span class="section-code">COMMUNICATION / PENDING</span><h2>待回留言</h2><p>忙碌时暂存消息，等角色恢复可联系后合并回复。</p></div><button id="refresh-queues"><svg><use href="#i-refresh"/></svg>刷新留言</button></div><div id="queue-list" class="cards queue-cards"></div><p class="hint">生成期间的新留言留到下一批。切换人设或对话后旧队列会暂停；发送结果不确定时，请先核对平台再重试。</p><div class="section-heading"><div class="heading-copy"><span class="section-code">SYSTEM / EVENT LOG</span><h2>运行记录</h2></div></div><div id="logs" class="logs paper-panel"></div>
+      <div class="intro-line"><div><span class="section-code">COMMUNICATION / PENDING</span><h2>待回留言</h2><p>忙碌时暂存消息，等角色恢复可联系后合并回复。</p></div><button id="refresh-queues"><svg><use href="#i-refresh"/></svg>刷新留言</button></div><p id="queue-expiry-stats" class="hint" aria-live="polite"></p><div id="queue-list" class="cards queue-cards"></div><p class="hint">生成期间的新留言留到下一批。切换人设或对话后旧队列会暂停；发送结果不确定时，请先核对平台再重试。</p><div class="section-heading"><div class="heading-copy"><span class="section-code">SYSTEM / EVENT LOG</span><h2>运行记录</h2></div></div><div id="logs" class="logs paper-panel"></div>
     </section>
     <section id="settings" class="tab" hidden>
       <div class="intro-line"><div><span class="section-code">SYSTEM / CONFIGURATION</span><h2>运行控制</h2><p>设置回复节奏、生成模型，以及参与日程的对话。</p></div><button id="save-settings" class="primary">保存设置</button></div>
-      <div class="settings-layout"><div class="settings-main"><article class="settings-card paper-panel"><h3><span>01 /</span> 生活与回复</h3><div class="toggle-row"><div><strong>启用角色日程</strong><p>默认关闭。开启后，受控对话按日程回复。</p></div><input id="enabled" class="switch" type="checkbox" aria-label="启用角色日程"></div><div class="form-grid"><label>日程与补回使用的模型<select id="provider"><option value="">跟随对话当前模型</option></select></label><label>默认时区<input id="default-timezone" value="Asia/Shanghai"></label><label>半忙最短延迟（秒）<input id="slow-min" type="number" min="5" max="3600"></label><label>半忙最长延迟（秒）<input id="slow-max" type="number" min="5" max="7200"></label><label>每个对话保留的留言条数<input id="queue-limit" type="number" min="5" max="200"></label><label>留言保留时间（小时）<input id="queue-expire" type="number" min="1" max="168"></label></div></article>
+      <div class="settings-layout"><div class="settings-main"><article class="settings-card paper-panel"><h3><span>01 /</span> 生活与回复</h3><div class="toggle-row"><div><strong>启用角色日程</strong><p>默认关闭。开启后，受控对话按日程回复。</p></div><input id="enabled" class="switch" type="checkbox" aria-label="启用角色日程"></div><div class="form-grid"><label>日程生成模型<select id="schedule-provider"><option value="">跟随对话当前模型</option></select></label><label>留言补回模型<select id="reply-provider"><option value="">跟随对话当前模型</option></select></label><div class="wide model-refresh"><button id="refresh-models" type="button"><svg><use href="#i-refresh"/></svg>获取 AstrBot 模型列表</button><span id="model-status" class="hint"></span></div><p id="legacy-model-note" class="hint wide" hidden></p><label>默认时区<input id="default-timezone" value="Asia/Shanghai"></label><label>半忙最短延迟（秒）<input id="slow-min" type="number" min="5" max="3600"></label><label>半忙最长延迟（秒）<input id="slow-max" type="number" min="5" max="7200"></label><label>每个对话保留的留言条数<input id="queue-limit" type="number" min="5" max="200"></label><label>留言保留时间（小时）<input id="queue-expire" type="number" min="1" max="168"></label></div></article>
       <article class="settings-card paper-panel"><h3><span>02 /</span> 世界观与活动检索</h3><div class="toggle-row"><div><strong>联网查找节日与原作活动</strong><p>使用 Tavily，检索世界名、身份和文化关键词。</p></div><input id="search-enabled" class="switch" type="checkbox" aria-label="启用联网检索"></div><label>Tavily API Key<input id="tavily-key" type="password" autocomplete="new-password" placeholder="留空保留现有密钥"></label><label class="check"><input id="clear-key" type="checkbox">清除已保存的密钥</label><p class="hint" id="key-status"></p></article></div>
       <article class="settings-card whitelist-card paper-panel"><h3><span>03 /</span> 对话白名单</h3><div class="toggle-row"><div><strong>只在指定对话生效</strong><p>白名单默认关闭</p></div><input id="whitelist-enabled" class="switch" type="checkbox" aria-label="启用对话白名单"></div><p class="whitelist-explanation">插件开启、白名单关闭时，适用于所有触发聊天的对话。打开白名单后，仅处理勾选的会话；未选择则不处理任何对话。</p><label class="search-label"><span>选择参与日程的对话</span><input id="session-search" type="search" placeholder="搜索名称、来源 ID 或人设"></label><div id="session-list" class="session-list"></div><label>手动添加来源 ID<div class="inline"><input id="manual-umo" placeholder="粘贴 /日程会话 返回的 ID"><button id="add-umo">添加</button></div></label><p class="hint">同一聊天窗口切换对话记录仍属于同一会话。选择后需保存设置。</p></article></div>
     </section>
-    <footer><span>PERSONA / LIFE <b>v0.2.0</b></span><span>UI adapted from <a href="https://github.com/LBEILC/RhineLabUI" target="_blank" rel="noopener noreferrer">RhineLabUI ↗</a><span class="footer-separator">/</span> AstrBot Plugin View</span></footer>
+    <section id="diagnostics" class="tab" hidden>
+      <div class="intro-line"><div><span class="section-code">RUNTIME / DIAGNOSTICS</span><h2>运行诊断</h2><p>查看实际会话的人设、模型与发送状态，便于排查日程没有生效的原因。</p></div><button id="refresh-diagnostics"><svg><use href="#i-refresh"/></svg>刷新诊断</button></div>
+      <div id="diagnostic-summary" class="diagnostic-summary"></div><label class="diagnostic-filter">选择要检查的会话<select id="diagnostic-session"><option value="">全部已知会话</option></select></label><p id="integration-note" class="hint"></p><div id="diagnostic-sessions" class="diagnostic-sessions"></div>
+    </section>
+    <footer><span>PERSONA / LIFE <b>v0.3.0</b></span><span>UI adapted from <a href="https://github.com/LBEILC/RhineLabUI" target="_blank" rel="noopener noreferrer">RhineLabUI ↗</a><span class="footer-separator">/</span> AstrBot Plugin View</span></footer>
   </main>
 </div>
 <dialog id="editor"><form id="edit-form"><div class="section-heading"><div class="heading-copy"><span class="section-code">RECORD / EDIT</span><h2 id="edit-title">编辑时段</h2></div><button type="button" id="close-editor" class="icon-button" aria-label="关闭编辑">✕</button></div><div id="edit-fields"></div><p id="edit-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-editor">取消</button><button type="submit" class="primary">应用修改</button></div></form></dialog>
 <dialog id="confirm-dialog" aria-labelledby="confirm-title"><form method="dialog"><div class="section-heading"><div class="heading-copy"><span class="section-code">ACTION / CONFIRM</span><h2 id="confirm-title">确认操作</h2></div></div><p id="confirm-message"></p><div class="dialog-actions"><button value="cancel" autofocus>取消</button><button value="confirm" class="primary">确认继续</button></div></form></dialog>
+<dialog id="boundary-dialog" aria-labelledby="boundary-title"><form id="boundary-form"><h2 id="boundary-title">调整相邻时段</h2><p id="boundary-context" class="hint"></p><label>新的交界时间（HH:MM）<input id="boundary-time" required pattern="[0-2][0-9]:[0-5][0-9]"></label><p id="boundary-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-boundary">取消</button><button type="submit" class="primary">应用边界</button></div></form></dialog>
 <script type="module" src="./app.js"></script>
 </body></html>

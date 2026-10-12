@@ -7,7 +7,7 @@ import json
 import random
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from astrbot.api import AstrBotConfig, logger
@@ -15,8 +15,9 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .core import (DEFAULTS, LABELS, Store, active_events, allowed, digest, field,
-                   slot_at, validate_events, validate_profile, validate_settings, validate_slots)
-from .generator import Generator
+                   merge_locked_slots, minute, slow_bounds, slot_at, validate_events,
+                   validate_profile, validate_settings, validate_slots, weekly_for_day)
+from .generator import Generator, is_chat_provider
 
 NAME = "astrbot_plugin_persona_schedule"
 CONTROL = {"日程", "日程重建", "日程会话"}
@@ -26,7 +27,7 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动和合并补回消息", "0.2.0")
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动和合并补回消息", "0.3.0")
 class PersonaSchedule(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -36,11 +37,24 @@ class PersonaSchedule(Star):
         self.store.save()
         self.generator = Generator(context, self.store)
         self.persona_locks, self.session_locks = {}, {}
-        self.tasks, self.jobs = set(), {}
+        self.tasks = set()
+        self.jobs = self.store.data.setdefault("jobs", {})
+        for job in self.jobs.values():
+            if job.get("status") == "running":
+                job.update(status="failed", stage="interrupted", updated_at=time.time(),
+                           message="插件已重载，生成任务中断；原日程仍保留，请重新生成")
+        self.health = self.store.data.setdefault("delivery_health", {})
+        for umo, health in self.health.items():
+            if health.get("status") == "sending":
+                health.update(status="uncertain", verified=False, error="上次发送期间进程退出，请核对平台")
+            elif health.get("status") == "generating":
+                health.update(status="deferred", verified=False, error="上次回复生成已中断，等待重新检查日程")
         self.generation_slots = asyncio.Semaphore(3)
         self.failures = {}
         self.closing = False
         self.worker = None
+        self.last_tick, self.worker_error = 0, ""
+        self.store.save()
         self._register_web()
 
     async def initialize(self):
@@ -108,29 +122,55 @@ class PersonaSchedule(Star):
         records = self.store.data["personas"]
         record = records.get(persona["id"])
         if not record or record["key"] != persona["key"]:
-            record = {"key": persona["key"], "profile": None, "calendars": {}, "days": {}}
+            record = {"key": persona["key"], "profile": None, "calendars": {}, "days": {}, "locked_days": {}}
             records[persona["id"]] = record
+        record.setdefault("locked_days", {})
         return record
 
-    async def ensure(self, persona, umo="", day="", *, force=""):
+    def _preserve_locks(self, record, days):
+        archive = record.setdefault("locked_days", {})
+        for day, schedule in days.items():
+            # Generated rows may inherit weekly locks. Only explicitly saved
+            # dates should become independent date-specific overrides.
+            if schedule.get("origin") != "manual":
+                continue
+            locks = [copy.deepcopy(row) for row in schedule["slots"] if row.get("locked")]
+            if locks:
+                archive[day] = locks
+            else:
+                archive.pop(day, None)
+        for old in sorted(archive)[:-90]:
+            archive.pop(old)
+
+    async def ensure(self, persona, umo="", day="", *, force="", progress=None):
+        def stage(name, percent, message):
+            if progress:
+                progress(name, percent, message)
+        stage("waiting", 5, "等待角色档案生成锁")
         async with self._lock(self.persona_locks, persona["id"]):
             original = self._record(persona)
             record = copy.deepcopy(original)
             changed = bool(force)
             if force == "profile":
+                self._preserve_locks(record, record["days"])
                 record.update(profile=None, calendars={}, days={})
             if record["profile"] is None:
+                stage("profile", 15, "分析人设与每周生活节奏")
                 async with self.generation_slots:
                     record["profile"] = await self.generator.profile(persona, umo)
+                old_weekly = (original.get("profile") or {}).get("weekly", [])
+                record["profile"]["weekly"] = merge_locked_slots(record["profile"]["weekly"], old_weekly, weekly=True)
                 changed = True
             profile = record["profile"]
             now = datetime.now(ZoneInfo(profile["timezone"]))
             day = day or now.date().isoformat()
             year = str(date.fromisoformat(day).year)
             if force == "calendar":
+                self._preserve_locks(record, {k: v for k, v in record["days"].items() if k.startswith(year)})
                 record["calendars"].pop(year, None)
                 record["days"] = {k: v for k, v in record["days"].items() if not k.startswith(year)}
             if year not in record["calendars"]:
+                stage("calendar", 40, "整理节庆、休假与世界观活动；已启用时检索参考资料")
                 async with self.generation_slots:
                     record["calendars"][year] = await self.generator.calendar(persona, profile, int(year), umo)
                 changed = True
@@ -139,17 +179,23 @@ class PersonaSchedule(Star):
                     if abs(int(old) - int(year)) > 1:
                         del record["calendars"][old]
             if force == "day":
+                self._preserve_locks(record, {day: record["days"][day]} if day in record["days"] else {})
                 record["days"].pop(day, None)
             if day not in record["days"]:
+                stage("day", 70, "编排当天日程并保留锁定时段")
                 recent = [{"date": k, "summary": v["summary"]} for k, v in sorted(record["days"].items()) if k < day][-3:]
                 async with self.generation_slots:
                     record["days"][day] = await self.generator.day(persona, profile, record["calendars"][year], day, recent, umo)
+                # A date-specific lock takes precedence over the weekly lock.
+                base = merge_locked_slots(weekly_for_day(profile, day), record["locked_days"].get(day, []))
+                record["days"][day]["slots"] = merge_locked_slots(record["days"][day]["slots"], base)
                 changed = True
                 for old in sorted(record["days"])[:-45]:
                     del record["days"][old]
             if changed:
                 # Commit all generated pieces together. A failed rebuild leaves
                 # previously edited profiles/calendars/schedules intact.
+                stage("saving", 95, "校验并保存完整日程")
                 self.store.data["personas"][persona["id"]] = record
                 self.store.save()
             else:
@@ -205,7 +251,7 @@ class PersonaSchedule(Star):
             if slot["status"] == "busy":
                 due = end
             elif slot["status"] == "slow":
-                due = time.time() + random.uniform(self.store.settings["slow_min_seconds"], self.store.settings["slow_max_seconds"])
+                due = time.time() + random.uniform(*slow_bounds(slot, self.store.settings))
             else:
                 due = time.time() + 2
             # This listener also runs before commands/plugins; no LLM call or
@@ -241,20 +287,18 @@ class PersonaSchedule(Star):
         while not self.closing:
             try:
                 await self.tick()
+                self.worker_error = ""
             except Exception as exc:
+                self.worker_error = type(exc).__name__
                 self._report_failure("worker", exc)
             await asyncio.sleep(self.store.settings["tick_seconds"])
 
     async def tick(self):
         # Work per session concurrently so one slow model does not stall everyone.
         now = time.time()
-        expired = [u for u, q in self.store.data["queues"].items()
-                   if now - q["created_at"] > self.store.settings["queue_expire_hours"] * 3600
-                   and q["delivery"] != "sending"]
-        for umo in expired:
-            self.store.data["queues"].pop(umo, None)
-        if expired:
-            self.store.log("已清理超过保留期限的待回复消息")
+        self.last_tick = now
+        if self.store.prune_expired(now):
+            self.store.log("已逐条清理超过保留期限的留言，保留期限内的新留言")
         if not self.store.settings["enabled"]:
             return
         for umo, session in list(self.store.data["sessions"].items()):
@@ -270,11 +314,8 @@ class PersonaSchedule(Star):
             if not allowed(self.store.settings, umo):
                 return
             try:
+                self.store.prune_expired(time.time(), umo)
                 queue = self.store.data["queues"].get(umo)
-                if queue and time.time() - queue["created_at"] > self.store.settings["queue_expire_hours"] * 3600:
-                    self.store.data["queues"].pop(umo, None)
-                    self.store.log("已清理超过保留期限的待回复消息")
-                    queue = None
                 env = await self.environment(umo, session["platform"])
                 if not env:
                     if queue:
@@ -305,6 +346,8 @@ class PersonaSchedule(Star):
                     return
                 await self._deliver(env, profile, schedule, slot, queue)
             except Exception as exc:
+                if self.health.get(umo, {}).get("status") == "generating":
+                    self._send_health(umo, "failed", error=type(exc).__name__, verified=False)
                 self._report_failure(umo, exc)
 
     async def _deliver(self, env, profile, schedule, slot, queue):
@@ -315,48 +358,68 @@ class PersonaSchedule(Star):
         if isinstance(history, str):
             history = json.loads(history)
         contexts = history[-12:] if isinstance(history, list) else []
-        async with self.generation_slots:
-            reply = (await self.generator.reply(env["persona"], messages, schedule, slot, umo, contexts)).strip()
+        self._send_health(umo, "generating", verified=False)
+        try:
+            async with self.generation_slots:
+                reply = (await self.generator.reply(env["persona"], messages, schedule, slot, umo, contexts)).strip()
+        except Exception as exc:
+            self._send_health(umo, "failed", error=type(exc).__name__, verified=False)
+            raise
         if not reply:
+            self._send_health(umo, "failed", error="模型未生成有效补回消息", verified=False)
             raise ValueError("模型未生成补回消息")
         reply = reply[:1200]
         # Recheck permissions, persona, conversation and time *after* model wait.
+        self.store.prune_expired(time.time(), umo)
         current = await self.environment(umo, env["platform"])
         if not allowed(self.store.settings, umo) or self.store.data["queues"].get(umo) is not queue:
+            self._send_health(umo, "deferred")
+            return
+        if not ids.issubset({row["id"] for row in queue["messages"]}):
+            self._send_health(umo, "deferred")
             return
         if not current or current["cid"] != env["cid"] or current["persona"]["key"] != env["persona"]["key"]:
             queue.update(delivery="paused", reason="生成回复期间切换了对话或人设")
+            self._send_health(umo, "paused")
             self.store.save()
             return
         record = self._record(current["persona"])
         current_profile = record["profile"]
         if current_profile is None:
+            self._send_health(umo, "deferred")
             return
         now = datetime.now(ZoneInfo(current_profile["timezone"]))
         current_schedule = record["days"].get(now.date().isoformat())
         if current_schedule is None:
+            self._send_health(umo, "deferred")
             return
         current_slot, end = slot_at(current_schedule, now)
         if current_slot["status"] == "busy":
             queue["due"] = end
+            self._send_health(umo, "deferred")
             self.store.save()
             return
         # Edits or a boundary crossing can invalidate the reply's context.
         if current_schedule is not schedule or current_slot != slot or queue["due"] > time.time():
+            self._send_health(umo, "deferred")
             return
         queue["delivery"] = "sending"
+        self._send_health(umo, "sending")
         self.store.save()
         try:
             sent = await self.context.send_message(umo, MessageChain().message(reply))
-        except Exception:
+        except Exception as exc:
             queue.update(delivery="uncertain", reason="平台发送发生异常，请核对是否送达；不会自动重复发送")
+            self._send_health(umo, "uncertain", error=type(exc).__name__, verified=False)
             self.store.save()
             return
         if sent is False:
             queue.update(delivery="pending", due=time.time() + 300, retry_after=time.time() + 300,
                          reason="平台未匹配，5 分钟后重试")
+            self._send_health(umo, "unmatched", error="未匹配可主动发送的平台", verified=False)
             self.store.save()
             return
+        self._send_health(umo, "accepted", verified=sent is True, sent_at=time.time())
         self.store.finish_batch(umo, ids)
         # A history write failure must never trigger another platform send.
         try:
@@ -368,6 +431,18 @@ class PersonaSchedule(Star):
         except Exception:
             self.store.log("补回消息已发送，但未能写入 AstrBot 对话历史")
         self.store.log("已合并补回一条消息")
+
+    def _send_health(self, umo, status, *, error="", verified=None, sent_at=None):
+        health = self.health.setdefault(umo, {"last_send_at": None, "verified": False})
+        health.update(status=status, error=error)
+        if verified is not None:
+            health["verified"] = verified
+        if sent_at is not None:
+            health["last_send_at"] = sent_at
+        # Bound diagnostics to the same session scale; no message content here.
+        if len(self.health) > 2000:
+            self.health.pop(next(iter(self.health)))
+        self.store.save()
 
     @filter.command("日程")
     async def schedule_command(self, event: AstrMessageEvent):
@@ -419,7 +494,8 @@ class PersonaSchedule(Star):
         routes = {"state": ("GET", self.web_state), "settings": ("POST", self.web_settings),
                   "detail": ("GET", self.web_detail), "generate": ("POST", self.web_generate),
                   "job": ("GET", self.web_job), "save": ("POST", self.web_save),
-                  "queue": ("POST", self.web_queue)}
+                  "queue": ("POST", self.web_queue), "providers": ("GET", self.web_providers),
+                  "diagnostics": ("GET", self.web_diagnostics)}
         for path, (method, handler) in routes.items():
             self.context.register_web_api(f"/{NAME}/{path}", self._web_handler(handler, method), [method], "角色日程 · " + path)
         self.web_available = True
@@ -446,6 +522,111 @@ class PersonaSchedule(Star):
         route.__name__ = handler.__name__ + "_route"
         return route
 
+    async def _providers(self):
+        getter = getattr(self.context, "get_all_providers", None)
+        if not getter:
+            return []
+        providers, seen = [], set()
+        for provider in await maybe_await(getter()) or []:
+            try:
+                if not await is_chat_provider(provider):
+                    continue
+                meta = await maybe_await(provider.meta())
+                pid = str(field(meta, "id", "") or "")
+                if not pid or pid in seen:
+                    continue
+                model_getter = getattr(provider, "get_model", None)
+                model = await maybe_await(model_getter()) if model_getter else field(meta, "model", "")
+                model = str(model or "")[:300]
+                providers.append({"id": pid, "name": f"{pid} · {model}" if model and model != pid else pid,
+                                  "model": model, "type": "chat"})
+                seen.add(pid)
+            except Exception:
+                # Never return provider config, endpoints, credentials or errors.
+                continue
+        return providers
+
+    async def web_providers(self, payload):
+        return {"providers": await self._providers(), "checked_at": time.time()}
+
+    def _worker_status(self):
+        state = "stopped" if self.closing else "running" if self.worker and not self.worker.done() else "not_started"
+        return {"state": state, "last_tick": self.last_tick or None, "last_error": self.worker_error}
+
+    def _persona_runtime(self, persona_id):
+        record = self.store.data["personas"].get(persona_id, {})
+        profile = record.get("profile")
+        result = {"next_contact_at": None, "current_status": "unknown", "current_activity": "尚未生成当天日程",
+                  "queue_count": sum(len(q["messages"]) for q in self.store.data["queues"].values()
+                      if record.get("key") == q["persona_key"]),
+                  "slow_min_seconds": self.store.settings["slow_min_seconds"],
+                  "slow_max_seconds": self.store.settings["slow_max_seconds"]}
+        if not profile:
+            return result
+        now = datetime.now(ZoneInfo(profile["timezone"]))
+        schedule = record["days"].get(now.date().isoformat())
+        if not schedule:
+            return result
+        slot, _ = slot_at(schedule, now)
+        low, high = slow_bounds(slot, self.store.settings)
+        result.update(current_status=slot["status"], current_activity=slot["title"],
+                      slow_min_seconds=low, slow_max_seconds=high)
+        if slot["status"] != "busy":
+            result["next_contact_at"] = now.timestamp()
+            return result
+        # Scan consecutive busy slots and cached following days. Do not pretend
+        # a future weekly template is the actual, possibly holiday-specific day.
+        for offset in range(46):
+            day = now.date() + timedelta(days=offset)
+            cached = record["days"].get(day.isoformat())
+            if not cached:
+                break
+            for row in cached["slots"]:
+                if offset == 0 and minute(row["end"], end=True) <= now.hour * 60 + now.minute:
+                    continue
+                if row["status"] != "busy":
+                    start = datetime.combine(day, datetime.min.time(), tzinfo=now.tzinfo) + timedelta(minutes=minute(row["start"]))
+                    result["next_contact_at"] = max(start.timestamp(), now.timestamp())
+                    return result
+        return result
+
+    async def web_diagnostics(self, payload):
+        target = str(payload.get("umo", ""))
+        if target and (len(target) > 300 or target.count(":") < 2):
+            raise ValueError("请选择有效的会话来源 ID")
+        sessions = list(self.store.data["sessions"].values())
+        if target:
+            sessions = [self.store.data["sessions"].get(target, {"umo": target, "platform": "", "title": target})]
+        rows = []
+        for session in sessions[:50]:
+            umo = session["umo"]
+            health = self.health.get(umo, {})
+            row = {"umo": umo, "title": session.get("title") or umo, "platform": session.get("platform", ""),
+                   "allowed": allowed(self.store.settings, umo), "persona_id": "", "cid": "",
+                   "schedule_provider_id": "", "reply_provider_id": "", "send_status": health.get("status", "unverified"),
+                   "last_send_at": health.get("last_send_at"), "last_send_error": health.get("error", ""),
+                   "active_send_verified": bool(health.get("verified"))}
+            try:
+                env = await self.environment(umo, row["platform"])
+                if env:
+                    row.update(persona_id=env["persona"]["id"], cid=env["cid"])
+                    row.update(self._persona_runtime(env["persona"]["id"]))
+                else:
+                    row["error"] = "当前会话没有启用人设"
+                for purpose in ("schedule", "reply"):
+                    try:
+                        row[purpose + "_provider_id"] = await self.generator.provider_id(umo, purpose=purpose)
+                    except Exception as exc:
+                        row[purpose + "_model_error"] = type(exc).__name__
+            except Exception as exc:
+                row["error"] = "会话解析失败（" + type(exc).__name__ + "）"
+            rows.append(row)
+        settings = self.store.settings
+        return {"worker": self._worker_status(), "web_available": self.web_available,
+                "models": {key: settings[key] or settings["provider_id"] for key in ("schedule_provider_id", "reply_provider_id")},
+                "sessions": rows, "truncated": len(sessions) > 50, "checked_at": time.time(),
+                "integration_mode": "live" if type(self.context).__module__.startswith("astrbot.") else "unknown"}
+
     async def web_state(self, payload):
         personas = await maybe_await(self.context.persona_manager.get_all_personas())
         options = [{"id": self._persona_data(p)["id"], "ready": bool(self.store.data["personas"].get(self._persona_data(p)["id"], {}).get("profile"))} for p in personas]
@@ -462,18 +643,21 @@ class PersonaSchedule(Star):
                 sessions[umo] = {"umo": umo, "title": field(conv, "title") or umo, "persona_id": field(conv, "persona_id") or "", "cid": field(conv, "cid"), "platform": ""}
         settings = copy.deepcopy(self.store.settings)
         settings["has_tavily_api_key"] = bool(settings.pop("tavily_api_key"))
-        queues = [{"umo": u, "count": len(q["messages"]), "dropped": q["dropped"], "due": q["due"],
+        queues = [{"umo": u, "count": len(q["messages"]), "dropped": q["dropped"], "expired": q.get("expired", 0), "due": q["due"],
+                   "persona_id": next((pid for pid, record in self.store.data["personas"].items() if record["key"] == q["persona_key"]), ""),
+                   "send_status": self.health.get(u, {}).get("status", "unverified"),
                    "delivery": q["delivery"], "reason": q["reason"]} for u, q in self.store.data["queues"].items()]
-        providers = []
-        getter = getattr(self.context, "get_all_providers", None)
-        if getter:
-            for provider in await maybe_await(getter()):
-                meta = provider.meta()
-                providers.append({"id": meta.id, "name": str(field(meta, "model", "") or meta.id)})
         return {"settings": settings, "personas": options, "sessions": list(sessions.values()),
-                "providers": providers, "queues": queues, "logs": self.store.data["logs"][-30:]}
+                "providers": await self._providers(), "queues": queues, "logs": self.store.data["logs"][-30:],
+                "expired_messages": self.store.data.get("expired_messages", 0), "jobs": list(self.jobs.values()),
+                "runtime": {"worker": self._worker_status(), "checked_at": time.time(),
+                            "personas": {item["id"]: self._persona_runtime(item["id"]) for item in options}}}
 
     async def web_settings(self, payload):
+        if "schedule_provider_id" in payload or "reply_provider_id" in payload:
+            # Clearing a new dropdown means follow the session, including after
+            # upgrading an old shared-model configuration.
+            payload = {**payload, "provider_id": ""}
         settings = validate_settings(payload, self.store.settings)
         previous = copy.deepcopy(dict(self.config))
         self.config.update(settings)
@@ -515,17 +699,25 @@ class PersonaSchedule(Star):
             if job["persona_id"] == persona["id"] and job["status"] == "running":
                 return {"job_id": job["id"]}
         job_id = uuid.uuid4().hex
-        job = {"id": job_id, "persona_id": persona["id"], "status": "running", "message": "正在生成"}
+        job = {"id": job_id, "persona_id": persona["id"], "date": day, "scope": force,
+               "status": "running", "stage": "waiting", "progress": 0, "message": "等待开始",
+               "created_at": time.time(), "updated_at": time.time()}
         self.jobs[job_id] = job
         # A real UMO allows using the persona's current session model selection.
         session = next((s for s in self.store.data["sessions"].values() if s["persona_id"] == persona["id"]), {})
         async def generate_job():
             try:
-                await self.ensure(persona, session.get("umo", ""), day, force=force)
-                job.update(status="done", message="生成完成")
+                await self.ensure(persona, session.get("umo", ""), day, force=force,
+                                  progress=lambda stage, percent, message: self._update_job(job, stage, percent, message))
+                self._update_job(job, "done", 100, "生成完成", status="done")
                 self.failures.clear()
+            except asyncio.CancelledError:
+                self._update_job(job, "interrupted", job["progress"], "生成任务已中断；原日程仍保留，请重新生成", status="failed")
+                raise
             except Exception as exc:
-                job.update(status="failed", message=f"生成失败（{type(exc).__name__}），请检查模型和设置")
+                phase = {"profile": "人设与周表", "calendar": "年度活动", "day": "当天日程", "saving": "保存校验"}.get(job["stage"], "生成")
+                detail = "模型调用超时，可调整超时或更换模型" if isinstance(exc, TimeoutError) else "请检查所选聊天模型、输出格式和配置"
+                self._update_job(job, job["stage"], job["progress"], f"{phase}失败（{type(exc).__name__}）；{detail}", status="failed")
                 self._report_failure("job", exc)
         self._spawn(generate_job(), "schedule-generation-" + job_id)
         if len(self.jobs) > 50:
@@ -534,7 +726,14 @@ class PersonaSchedule(Star):
                     break
                 if self.jobs[old]["status"] != "running":
                     del self.jobs[old]
+        self.store.save()
         return {"job_id": job_id}
+
+    def _update_job(self, job, stage, progress, message, *, status=None):
+        job.update(stage=stage, progress=progress, message=message, updated_at=time.time())
+        if status:
+            job["status"] = status
+        self.store.save()
 
     async def web_job(self, payload):
         job = self.jobs.get(str(payload.get("id", "")))
@@ -548,7 +747,9 @@ class PersonaSchedule(Star):
         async with self._lock(self.persona_locks, persona["id"]):
             record = self._record(persona)
             if kind == "profile":
-                record["profile"] = validate_profile(payload.get("value"))
+                profile = validate_profile(payload.get("value"))
+                self._preserve_locks(record, record["days"])
+                record["profile"] = profile
                 record["calendars"], record["days"] = {}, {}
             elif kind == "calendar":
                 year = self._year(str(payload.get("date", "")))
@@ -559,6 +760,7 @@ class PersonaSchedule(Star):
                     old = next((r for r in existing.get("events", []) if r["id"] == row["id"]), None)
                     if old and all(row.get(k) == old.get(k) for k in row if k != "origin"):
                         row["origin"] = old["origin"]
+                self._preserve_locks(record, {k: v for k, v in record["days"].items() if k.startswith(str(year))})
                 record["calendars"][str(year)] = {**existing, "year": year, "events": rows,
                     "revision": existing.get("revision", 0) + 1}
                 record["days"] = {k: v for k, v in record["days"].items() if not k.startswith(str(year))}
@@ -574,6 +776,7 @@ class PersonaSchedule(Star):
                     "summary": str(value.get("summary", "手动日程"))[:1000], "origin": "manual",
                     "revision": old.get("revision", 0) + 1,
                     "events": active_events(record["calendars"].get(str(year), {}).get("events", []), day)}
+                self._preserve_locks(record, {day: record["days"][day]})
             else:
                 raise ValueError("保存类型无效")
             self.store.save()

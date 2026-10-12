@@ -6,6 +6,8 @@
 
 仓库：[iownmmiku/astrbot_plugin_persona_schedule](https://github.com/iownmmiku/astrbot_plugin_persona_schedule)。
 
+版本变化见 [更新日志](CHANGELOG.md)。
+
 ## 回复行为
 
 | 状态 | 行为 | 可能的场景 |

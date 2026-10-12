@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>角色日程 · 生活手帐</title><link rel="stylesheet" href="./style.css"></head>
+<body>
+<svg class="svg-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Zm0 0v15M6 9h3m-3 4h3m6-4h3m-3 4h3"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M5 19l1.4-1.4M17.6 6.4 19 5"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+<symbol id="i-flower" viewBox="0 0 24 24"><path d="M12 8C7 0 2 8 8 12c-8 5 0 10 4 4 5 8 10 0 4-4 8-5 0-10-4-4Z"/><circle cx="12" cy="12" r="2"/></symbol>
+<symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M19 10a7 7 0 0 0-12-5L4 8m16 8-3 3a7 7 0 0 1-12-5"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3ZM20 2v4m-2-2h4"/></symbol>
+<symbol id="i-pen" viewBox="0 0 24 24"><path d="m15 5 4 4M4 20l5-1L21 7a2.8 2.8 0 0 0-4-4L5 15l-1 5Z"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 15A9 9 0 0 1 9 4a9 9 0 1 0 11 11Z"/></symbol>
+<symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+</defs></svg>
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand"><span class="brand-icon"><svg><use href="#i-book"/></svg></span><span>角色日程<small>PERSONA JOURNAL</small></span></div>
+  <div class="nav-caption">我的生活手帐</div>
+  <nav aria-label="日程管理">
+    <button data-tab="today" class="active"><svg><use href="#i-sun"/></svg><span>今日篇章</span><span class="nav-dot"></span></button>
+    <button data-tab="weekly"><svg><use href="#i-grid"/></svg><span>角色与周表</span></button>
+    <button data-tab="calendar"><svg><use href="#i-flower"/></svg><span>节日与活动</span></button>
+    <button data-tab="queues"><svg><use href="#i-mail"/></svg><span>留言信箱</span><b id="queue-count">0</b></button>
+    <button data-tab="settings"><svg><use href="#i-settings"/></svg><span>手帐设置</span></button>
+  </nav>
+  <div class="sidebar-note"><span class="mini-star">✦</span><p>每个角色，<br>都有自己的生活节奏。</p><span class="note-line"></span><small>把日常写进故事里</small></div>
+  <div class="aside-status"><span class="dot"></span><span id="enabled-label">插件尚未启用</span></div><div class="sidebar-footer">AstrBot Plugin <span>v0.1</span></div>
+</aside>
+<main>
+  <header class="page-header"><div><p class="eyebrow">LITTLE MOMENTS, EVERY DAY</p><h1 id="page-title">今日篇章</h1></div><div class="header-actions"><span class="local-tag">角色的日常，由人设开始</span><button id="refresh" class="icon-button" aria-label="刷新"><svg><use href="#i-refresh"/></svg></button></div></header>
+  <div id="notice" role="status" hidden></div>
+  <section class="toolbar" id="persona-toolbar" aria-label="人设与日期">
+    <label class="persona-select"><span>记录谁的生活</span><select id="persona"><option value="">选择 AstrBot 人设</option></select></label><span class="toolbar-divider"></span>
+    <label class="date-select"><span>手帐日期</span><input id="date" type="date" min="1970-01-01" max="2100-12-31"></label>
+    <div class="toolbar-end"><span id="job-status" aria-live="polite"></span><button id="generate" class="primary"><svg><use href="#i-spark"/></svg>生成这一天</button></div>
+  </section>
+  <section id="today" class="tab">
+    <article class="journal-hero"><div class="hero-copy"><span class="paper-label">A PAGE OF LIFE <span>✧</span></span><h2>把今天，过成自己的故事<span>。</span></h2><p id="day-summary">这一天还没有安排</p><div id="hero-current" class="hero-current"></div><div id="day-events" class="hero-events">等待新的一页</div></div>
+    <div class="hero-sticker" aria-hidden="true"><svg viewBox="0 0 210 160" fill="none"><path d="m168 14 4 12 13 3-11 7-1 13-10-8-13 3 5-12-7-10 13 1 7-9Z" fill="#f9d793" stroke="#c2a26b"/><path d="M32 42 20 26m12 16-20 1M173 131l14 7m-14-7 5-15" stroke="#b6a6d3" stroke-width="2" stroke-linecap="round"/><rect x="48" y="41" width="112" height="104" rx="13" transform="rotate(-9 48 41)" fill="#fffaf3" stroke="#d2c3e7" stroke-width="2"/><path d="m80 35-8-22 25 13m31 7 19-17-2 30" fill="#82739e" stroke="#65577f" stroke-width="2" stroke-linejoin="round"/><path d="M71 61c-3-28 18-38 39-35 28 2 47 22 37 47-8 18-28 26-49 19-17-6-25-15-27-31Z" fill="#82739e" stroke="#65577f" stroke-width="2"/><path d="M83 61c5 5 9 5 13 0m24 3c5 4 9 4 13-1" stroke="#fff8ed" stroke-width="2.5" stroke-linecap="round"/><path d="m105 68 5 1-2 4-3-5Z" fill="#f6c7cf"/><path d="M99 76c4 3 7 1 9-3 1 5 5 7 9 4" stroke="#f6c7cf" stroke-width="2" stroke-linecap="round"/><ellipse cx="87" cy="72" rx="6" ry="3" fill="#e6a6b9"/><ellipse cx="130" cy="75" rx="6" ry="3" fill="#e6a6b9"/><path d="m58 104 38 1 14 9 15-10 34 1-9 35-32-1-11 6-13-7-35-1-1-33Z" fill="#e8ddf3" stroke="#b8a5ce" stroke-width="2"/><path d="m110 114-3 31m-39-31 22 1m-19 7 19 1m34-8h23m-23 8h19" stroke="#b8a5ce" stroke-width="2" stroke-linecap="round"/><ellipse cx="84" cy="104" rx="11" ry="7" transform="rotate(6 84 104)" fill="#82739e" stroke="#65577f" stroke-width="2"/><ellipse cx="136" cy="104" rx="11" ry="7" transform="rotate(-6 136 104)" fill="#82739e" stroke="#65577f" stroke-width="2"/><path d="m27 99 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1 3-6Z" fill="#eebac8"/><circle cx="189" cy="82" r="3" fill="#b8a5ce"/></svg><span>my little daily life</span></div></article>
+    <div class="week-strip-heading"><span id="journal-month">本周记录</span><button id="jump-today" class="text-button">回到今天 ↗</button></div><div id="date-strip" class="date-strip" aria-label="本周日期"></div>
+    <div class="daily-layout">
+      <div class="timeline-panel"><div class="section-heading"><div class="heading-copy"><p class="eyebrow">DAILY TIMELINE</p><h2>一天的小事 <small id="day-count"></small></h2></div><div><button id="add-day" class="subtle-button">＋ 添加</button><button id="save-day">保存日程</button></div></div><div id="day-list" class="timeline"></div><p class="hint timeline-hint">日程需完整覆盖 24 小时；时段结束后，角色会按新的状态回复。</p></div>
+      <div class="journal-rail">
+        <article class="persona-card paper-panel"><div class="paper-tape" aria-hidden="true"></div><p class="eyebrow">CHARACTER FILE</p><div class="persona-avatar" id="persona-avatar" aria-hidden="true">✧</div><h2 id="persona-name">等待认识新角色</h2><p id="persona-identity">从人设出发，记录生活。</p><div id="persona-tags" class="persona-tags"></div><div class="profile-divider"></div><div class="now-heading"><span class="dot"></span>此刻的生活</div><h3 id="current-state">等待生成日程</h3><p id="current-note">先选择人设并生成档案。</p></article>
+        <article class="rhythm-card paper-panel"><div class="rail-heading"><h3>回复节奏</h3><span>24h</span></div><div id="rhythm-bar" class="rhythm-bar" aria-label="全天回复状态分布"></div><div class="rhythm-labels"><span>00:00</span><span>12:00</span><span>24:00</span></div><div class="status-guide"><div><span class="status-dot free"></span><strong>空闲</strong><span>正常聊天</span></div><div><span class="status-dot slow"></span><strong>半忙</strong><span>慢一点，简短回</span></div><div><span class="status-dot busy"></span><strong>忙碌</strong><span>暂不回，忙完补一句</span></div></div></article>
+        <article class="activity-note"><span class="note-flower" aria-hidden="true">✿</span><p class="eyebrow">TODAY'S SPECIAL</p><h3>今天有什么特别？</h3><div id="today-events"></div></article>
+      </div>
+    </div>
+  </section>
+  <section id="weekly" class="tab" hidden>
+    <div class="intro-line"><div><span class="chapter-label">CHAPTER 01</span><h2>属于这个角色的生活方式</h2><p>身份、世界观和习惯，构成每一天的底色。</p></div><button id="generate-profile"><svg><use href="#i-spark"/></svg>重新分析人设</button></div>
+    <details class="profile-details paper-panel"><summary><span><svg><use href="#i-book"/></svg>角色生活档案 <small id="profile-preview">展开编辑世界观与生活习惯</small></span><span class="details-arrow">⌄</span></summary><div class="form-grid" id="profile-form">
+      <label>世界观类型<select id="world-type"><option value="real">现实世界</option><option value="fanfiction">同人世界</option><option value="original">自创世界</option></select></label><label>世界 / 作品名称<input id="world-name" placeholder="例如：现实世界、原作名、王国名"></label><label>关联国家 / 地区<input id="countries" placeholder="CN, JP；无关联留空"></label><label>角色时区<input id="persona-timezone" placeholder="Asia/Tokyo"></label><label class="wide">职业与身份<input id="identity" placeholder="按人设填写，不限学生"></label><label class="wide">生活习惯<textarea id="lifestyle" rows="3"></textarea></label><label class="wide">文化、节庆与历法依据<textarea id="calendar-notes" rows="3" placeholder="虚构历法如何映射到现实日期，也可以写在这里"></textarea></label>
+    </div><p class="hint">保存档案或周表会让旧活动与日程失效；重新分析会重建全部安排。</p></details>
+    <div class="section-heading"><div class="heading-copy"><p class="eyebrow">A WEEK IN LIFE</p><h2>每周的固定节奏 <small id="week-count"></small></h2></div><div><button id="add-week">＋ 添加时段</button><button id="save-profile" class="primary">保存档案与周表</button></div></div><div class="filter-tabs" id="week-filter" aria-label="筛选周表"><button class="active" data-week-filter="all">全部</button><button data-week-filter="weekday">工作日</button><button data-week-filter="weekend">周末</button></div><div id="week-list" class="cards weekly-cards"></div>
+  </section>
+  <section id="calendar" class="tab" hidden>
+    <div class="intro-line"><div><span class="chapter-label">CHAPTER 02</span><h2>值得记住的日子</h2><p>真实节庆、原作事件，也可以是世界里独有的小纪念。</p></div><button id="generate-calendar"><svg><use href="#i-spark"/></svg>重新生成全年活动</button></div>
+    <article class="month-panel paper-panel"><div class="month-heading"><div><span class="eyebrow"><span id="calendar-year"></span> · EVENT CALENDAR</span><h2 id="month-title">活动月历</h2></div><div class="month-controls"><button id="month-prev" class="icon-button" aria-label="上个月"><svg class="flip"><use href="#i-chevron"/></svg></button><button id="month-next" class="icon-button" aria-label="下个月"><svg><use href="#i-chevron"/></svg></button></div></div><div class="weekday-labels"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div id="month-grid" class="month-grid" aria-label="活动月历"></div><div class="calendar-key"><span><i class="status-dot slow"></i>角色活动</span><span><i class="status-dot busy"></i>休假安排</span><small>点击日期，翻到那一天的手帐 ↗</small></div></article>
+    <div class="section-heading"><div class="heading-copy"><p class="eyebrow">SPECIAL DAYS</p><h2>年度活动 <small id="event-count"></small></h2></div><div><button id="add-event">＋ 添加活动</button><button id="save-calendar" class="primary">保存活动</button></div></div><p class="hint">“休假”改变常规作息，回复速度仍由当天日程决定。修改活动后需重新生成当天。</p><div id="calendar-notices" class="subtle"></div><div id="event-list" class="cards event-cards"></div>
+  </section>
+  <section id="queues" class="tab" hidden>
+    <div class="intro-line"><div><span class="chapter-label">LETTER BOX</span><h2>等有空了，再好好说一句</h2><p>忙碌时的留言会收在这里，恢复可联系后合并回复。</p></div><button id="refresh-queues"><svg><use href="#i-refresh"/></svg>刷新信箱</button></div><div id="queue-list" class="cards"></div><p class="hint">生成期间新来的留言留到下一批。切换人设或对话后，旧队列会暂停；发送结果不确定时，请先核对平台再重试。</p><div class="section-heading"><div class="heading-copy"><p class="eyebrow">JOURNAL LOG</p><h2>手帐运行记录</h2></div></div><div id="logs" class="logs paper-panel"></div>
+  </section>
+  <section id="settings" class="tab" hidden>
+    <div class="intro-line"><div><span class="chapter-label">JOURNAL PREFERENCES</span><h2>让生活按你喜欢的方式展开</h2><p>调整回复节奏，并选择哪些对话参与角色的日常。</p></div><button id="save-settings" class="primary">保存设置</button></div>
+    <div class="settings-layout"><div class="settings-main"><article class="settings-card paper-panel"><h3><span>01</span> 生活与回复</h3><div class="toggle-row"><div><strong>启用角色日程</strong><p>默认关闭。开启后，受控对话会按日程回复。</p></div><input id="enabled" class="switch" type="checkbox" aria-label="启用角色日程"></div><div class="form-grid"><label>日程与补回使用的模型<select id="provider"><option value="">跟随对话当前模型</option></select></label><label>默认时区<input id="default-timezone" value="Asia/Shanghai"></label><label>半忙最短延迟（秒）<input id="slow-min" type="number" min="5" max="3600"></label><label>半忙最长延迟（秒）<input id="slow-max" type="number" min="5" max="7200"></label><label>每个对话保留的留言条数<input id="queue-limit" type="number" min="5" max="200"></label><label>留言保留时间（小时）<input id="queue-expire" type="number" min="1" max="168"></label></div></article>
+    <article class="settings-card paper-panel"><h3><span>02</span> 世界观与活动检索</h3><div class="toggle-row"><div><strong>联网查找节日与原作活动</strong><p>使用 Tavily，仅检索世界名、身份和文化关键词。</p></div><input id="search-enabled" class="switch" type="checkbox" aria-label="启用联网检索"></div><label>Tavily API Key<input id="tavily-key" type="password" autocomplete="new-password" placeholder="留空保留现有密钥"></label><label class="check"><input id="clear-key" type="checkbox">清除已保存的密钥</label><p class="hint" id="key-status"></p></article></div>
+    <article class="settings-card whitelist-card paper-panel"><h3><span>03</span> 对话白名单</h3><div class="toggle-row"><div><strong>只在指定对话生效</strong><p>白名单默认关闭</p></div><input id="whitelist-enabled" class="switch" type="checkbox" aria-label="启用对话白名单"></div><p class="whitelist-explanation">插件开启、白名单关闭时，适用于所有触发聊天的对话。打开白名单后，仅处理勾选的会话；不选择则不处理任何对话。</p><label class="search-label"><span>选择参与日程的对话</span><input id="session-search" type="search" placeholder="搜索名称、来源 ID 或人设"></label><div id="session-list" class="session-list"></div><label>手动添加来源 ID<div class="inline"><input id="manual-umo" placeholder="粘贴 /日程会话 返回的 ID"><button id="add-umo">添加</button></div></label><p class="hint">按会话来源 ID 匹配，同一聊天窗口切换对话记录仍属于同一会话。选择后需保存设置。</p></article></div>
+  </section>
+  <footer><span>✦ 角色日程 · 生活手帐</span><span>人设决定生活，活动改变每一天</span></footer>
+</main>
+</div>
+<dialog id="editor"><form id="edit-form"><div class="section-heading"><div class="heading-copy"><p class="eyebrow">A LITTLE CHANGE</p><h2 id="edit-title">编辑时段</h2></div><button type="button" id="close-editor" class="icon-button" aria-label="关闭编辑">✕</button></div><div id="edit-fields"></div><p id="edit-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-editor">取消</button><button type="submit" class="primary">应用修改</button></div></form></dialog>
+<script type="module" src="./app.js"></script>
+</body></html>

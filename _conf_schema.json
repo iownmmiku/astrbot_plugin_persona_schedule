@@ -1,0 +1,15 @@
+{
+  "enabled": {"description":"启用角色日程","type":"bool","default":false,"hint":"默认关闭；先在插件可视化视图中生成并检查人设日程。"},
+  "whitelist_enabled": {"description":"启用对话白名单","type":"bool","default":false,"hint":"开启后仅选择的会话生效；推荐在可视化视图中勾选对话。"},
+  "whitelist": {"description":"对话白名单（会话来源 ID）","type":"list","default":[],"hint":"会话来源 ID，可通过 /日程会话 获取。"},
+  "provider_id": {"description":"日程与补回使用的聊天模型","type":"string","default":"","_special":"select_provider","hint":"为空时跟随对话当前聊天模型。"},
+  "timezone": {"description":"默认时区","type":"string","default":"Asia/Shanghai","hint":"人设档案可单独设定时区，虚构世界也需映射到一个现实运行时区。"},
+  "slow_min_seconds": {"description":"半忙最短延迟（秒）","type":"int","default":60},
+  "slow_max_seconds": {"description":"半忙最长延迟（秒）","type":"int","default":180},
+  "tick_seconds": {"description":"检查日程与队列的间隔（秒）","type":"int","default":15},
+  "timeout_seconds": {"description":"单次模型调用超时（秒）","type":"int","default":90},
+  "queue_limit": {"description":"每个会话最多保留留言条数","type":"int","default":60},
+  "queue_expire_hours": {"description":"留言保留时间（小时）","type":"int","default":72},
+  "search_enabled": {"description":"启用节庆与世界观联网检索","type":"bool","default":false,"hint":"使用 Tavily 搜索世界名、身份和文化关键词；未启用时按人设创作并标注。"},
+  "tavily_api_key": {"description":"Tavily API Key","type":"string","default":"","secret":true}
+}

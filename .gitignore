@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.qa/
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+/state.json
+*.zip

@@ -62,10 +62,13 @@ async def main():
     bridge = '''<script>window.AstrBotPluginView={ready:async()=>({isDark:false}),apiGet:async(path,query)=>{const r=await fetch('/qa-api/'+path+'?'+new URLSearchParams(query||{}));const d=await r.json();if(!r.ok)throw Error(d.message);return d},apiPost:async(path,body)=>{const r=await fetch('/qa-api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.message);return d}};</script>'''
     async def index(request):
         html=(ROOT/'views/schedule/index.html').read_text(encoding='utf-8').replace('<head>','<head>'+bridge)
+        # QA-only theme override; production themes are supplied by AstrBot.
+        if request.query.get('theme') in {'light','dark'}:
+            html=html.replace('<html lang="zh-CN">','<html lang="zh-CN" data-theme="'+request.query['theme']+'">')
         return web.Response(text=html,content_type='text/html')
     async def asset(request):
         name=request.match_info['name']
-        if name not in {'app.js','style.css'}:raise web.HTTPNotFound()
+        if name not in {'app.js','style.css','vendor/rhinelab/content-transition.js'}:raise web.HTTPNotFound()
         return web.FileResponse(ROOT/'views/schedule'/name)
     handlers={"state":plugin.web_state,"detail":plugin.web_detail,"settings":plugin.web_settings,"generate":plugin.web_generate,"job":plugin.web_job,"save":plugin.web_save,"queue":plugin.web_queue}
     async def api(request):
@@ -75,7 +78,7 @@ async def main():
             return web.json_response(value)
         except Exception as exc:
             return web.json_response({'message':str(exc)},status=400)
-    app=web.Application();app.router.add_get('/',index);app.router.add_route('*','/qa-api/{name}',api);app.router.add_get('/{name}',asset)
+    app=web.Application();app.router.add_get('/',index);app.router.add_route('*','/qa-api/{name}',api);app.router.add_get('/{name:.+}',asset)
     runner=web.AppRunner(app);await runner.setup();await web.TCPSite(runner,'127.0.0.1',8769).start()
     print('QA preview: http://127.0.0.1:8769 (fixture data only)',flush=True)
     await asyncio.Event().wait()

@@ -26,7 +26,7 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动和合并补回消息", "0.1.0")
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动和合并补回消息", "0.2.0")
 class PersonaSchedule(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

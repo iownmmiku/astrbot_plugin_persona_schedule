@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
+import re
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlencode
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 
@@ -52,6 +56,11 @@ async def run_smoke(isolation: Path):
     from astrbot.core.provider.provider import Provider
     from astrbot.core.umop_config_router import UmopConfigRouter
     from astrbot.core.utils.astrbot_path import get_astrbot_root
+    from astrbot.core.star.star_manager import PluginManager
+    from astrbot.dashboard.plugin_page_auth import PluginPageAuth
+    from astrbot.dashboard.services.plugin_page_service import PluginPageService, PluginPageServiceError
+    from astrbot.dashboard.services.plugin_service import PluginService
+    import jwt
     from starlette.requests import Request
 
     from astrbot_plugin_persona_schedule.main import NAME, PersonaSchedule
@@ -91,6 +100,9 @@ async def run_smoke(isolation: Path):
                 value = {"events": []}
             elif "生成给定日期" in (system_prompt or ""):
                 value = {"summary": "离线测试的一天", "slots": [slot]}
+            elif "第一人称生活日记" in (system_prompt or ""):
+                value = {"title": "旅途的一页", "mood": "平静",
+                         "content": "今天在旅途中停下脚步，在住处慢慢休息。我把平静的一天记在这里。"}
             else:
                 return LLMResponse(role="assistant", completion_text="刚才在路上，看到你留下的两条消息了，回来一起聊。")
             return LLMResponse(role="assistant", completion_text=json.dumps(value, ensure_ascii=False))
@@ -121,8 +133,9 @@ async def run_smoke(isolation: Path):
     await personas.create_persona("offline-traveler", "原创世界的旅人，不上学，没有现实国籍。", tools=[])
     conversations = ConversationManager(db_helper)
     providers = ProviderManager(acm, db_helper, personas)
-    schedule_provider, reply_provider = OfflineProvider("offline-schedule"), OfflineProvider("offline-reply")
-    providers.provider_insts.extend([schedule_provider, reply_provider])
+    schedule_provider, reply_provider, diary_provider = (
+        OfflineProvider(name) for name in ("offline-schedule", "offline-reply", "offline-diary"))
+    providers.provider_insts.extend([schedule_provider, reply_provider, diary_provider])
     providers.inst_map.update({p.meta().id: p for p in providers.provider_insts})
     event_queue = asyncio.Queue()
     platforms = PlatformManager(astrbot_config, event_queue)
@@ -150,12 +163,127 @@ async def run_smoke(isolation: Path):
         return json.loads(response.body)
 
     try:
+        metadata = PluginManager._load_plugin_metadata(str(ROOT))
+        assert metadata and metadata.name == NAME
+        metadata.root_dir_name = ROOT.name
+        page_manager = SimpleNamespace(
+            context=SimpleNamespace(get_all_stars=lambda: [metadata]),
+            plugin_store_path=str(ROOT.parent), reserved_plugin_path=str(isolation / "unused-reserved"))
+        page_service = PluginPageService(page_manager)
+        discovered = await page_service.discover_plugin_pages(metadata)
+        assert [page.name for page in discovered] == ["schedule"]
+        assert await page_service.resolve_plugin_pages_root(metadata) == ROOT / "pages"
+        serialized = await page_service.serialize_plugin_pages(metadata)
+        assert serialized[0]["i18n_key"] == "pages.schedule"
+        components = await PluginService(None, page_manager).get_plugin_page_components(
+            metadata, page_service.serialize_plugin_pages)
+        assert components[0]["type"] == "page" and components[0]["page_name"] == "schedule"
+        assert metadata.i18n["zh-CN"]["pages"]["schedule"]["title"] == "角色日程"
+        checks.append("real 4.28 PluginManager metadata + pages/schedule discovery + official page component + i18n")
+
+        # Exercise official asset serving and token scope helpers, without a
+        # dashboard server, browser login, or an existing JWT configuration.
+        secret = "offline-smoke-signing-secret-only-never-a-real-dashboard-key"
+        entry = await page_service.get_plugin_page_entry_config(
+            plugin_name=NAME, page_name="schedule", jwt_secret=secret,
+            username="offline-smoke", locale="zh-CN")
+        entry_url = urlsplit(entry["content_path"])
+        token = parse_qs(entry_url.query)["asset_token"][0]
+        claims = jwt.decode(token, secret, algorithms=["HS256"])
+        assert claims["plugin_name"] == NAME and claims["page_name"] == "schedule"
+        assert claims["exp"] - claims["iat"] == 60
+        assert PluginPageAuth.is_asset_token(claims)
+        assert PluginPageAuth.is_scope_valid(claims, entry_url.path)
+        assert not PluginPageAuth.is_scope_valid(claims, entry_url.path.replace("/schedule/", "/other/"))
+        assert not PluginPageAuth.is_scope_valid(claims, entry_url.path.replace(NAME, "other-plugin"))
+        assert not PluginPageAuth.is_scope_valid(claims, f"/api/plugin/{NAME}/state")
+        for invalid_claims in ({**claims, "exp": 1},):
+            expired = jwt.encode(invalid_claims, secret, algorithm="HS256")
+            try:
+                jwt.decode(expired, secret, algorithms=["HS256"])
+            except jwt.ExpiredSignatureError:
+                pass
+            else:
+                raise AssertionError("Expired page token was accepted")
+        assert page_service.build_initial_context(
+            asset_token=token, jwt_secret="a-different-offline-signing-secret-only", locale="zh-CN", theme="dark") is None
+
+        async def page_asset(path, theme="dark"):
+            return await page_service.serve_page_content(
+                plugin_name=NAME, page_name="schedule", asset_path=path,
+                asset_token=token, jwt_secret=secret, username="offline-smoke", locale="zh-CN", theme=theme)
+
+        class Assets(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.urls = []
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                for key in ("src", "href"):
+                    if key in attributes:
+                        self.urls.append(attributes[key])
+
+        html = await page_asset("")
+        assert html.content_type.startswith("text/html")
+        assert 'data-theme="dark"' in html.content and 'name="color-scheme" content="dark"' in html.content
+        assets = Assets()
+        assets.feed(html.content)
+        prefix = f"/api/plugin/page/content/{NAME}/schedule/"
+        assert any(urlsplit(url).path == prefix + "style.css" for url in assets.urls)
+        assert any(urlsplit(url).path == prefix + "app.js" for url in assets.urls)
+        assert any(urlsplit(url).path == "/api/plugin/page/bridge-sdk.js" for url in assets.urls)
+        for url in assets.urls:
+            parsed = urlsplit(url)
+            if parsed.path.startswith(prefix) or parsed.path == "/api/plugin/page/bridge-sdk.js":
+                assert parse_qs(parsed.query) == {"asset_token": [token], "theme": ["dark"]}
+                assert PluginPageAuth.is_scope_valid(claims, parsed.path)
+        light = await page_asset("index.html", theme="light")
+        assert 'data-theme="light"' in light.content
+        css = await page_asset("style.css")
+        assert css.content_type.startswith("text/css") and "data-theme" in css.content
+        app = await page_asset("app.js")
+        assert app.content_type.startswith("application/javascript")
+        imports = re.findall(r"\bfrom\s+['\"]([^'\"]+)['\"]", app.content)
+        vendor_url = next(url for url in imports if "vendor/rhinelab/content-transition.js" in url)
+        assert urlsplit(vendor_url).path == prefix + "vendor/rhinelab/content-transition.js"
+        assert parse_qs(urlsplit(vendor_url).query) == {"asset_token": [token], "theme": ["dark"]}
+        vendor = await page_asset("vendor/rhinelab/content-transition.js")
+        assert vendor.content_type.startswith("application/javascript") and "ContentTransition" in vendor.content
+        # The current CSS uses no file-backed url(). This fixture exercises the
+        # SDK's CSS rewrite path without introducing an artificial UI asset.
+        css_fixture = page_service.rewrite_plugin_page_css(
+            'a{background:url("./vendor/rhinelab/LICENSE?download=1#license")}',
+            NAME, "schedule", "style.css", {"asset_token": token, "theme": "dark"})
+        fixture_url = re.search(r'url\("(.*?)"\)', css_fixture).group(1)
+        assert urlsplit(fixture_url).path == prefix + "vendor/rhinelab/LICENSE"
+        assert parse_qs(urlsplit(fixture_url).query) == {
+            "download": ["1"], "asset_token": [token], "theme": ["dark"]}
+        assert urlsplit(fixture_url).fragment == "license"
+        bridge = await page_service.serve_bridge_sdk(
+            asset_token=token, jwt_secret=secret, locale="en-US", theme="dark")
+        assert bridge.content_type.startswith("application/javascript")
+        assert "AstrBotPluginPage" in bridge.content and "apiGet" in bridge.content
+        initial = re.search(r"__setInitialContext\((\{.*\})\);", bridge.content)
+        initial = json.loads(initial.group(1))
+        assert initial["pageTitle"] == "角色日程" and initial["locale"] == "zh-CN" and initial["isDark"]
+        assert initial["i18n"]["zh-CN"]["pages"]["schedule"]["title"] == "角色日程"
+        for forbidden in ("../metadata.yaml", "../../main.py"):
+            try:
+                await page_asset(forbidden)
+            except PluginPageServiceError as exc:
+                assert exc.status_code == 404
+            else:
+                raise AssertionError("Page asset escaped its directory")
+        assert page_service.build_security_headers()["Cache-Control"] == "no-store"
+        checks.append("real page HTML/CSS/JS/vendor serving + scoped 60s token + theme + bridge initial context + asset rewriting")
+
         state = await request_api("state")
         assert "offline-traveler" in {p["id"] for p in state["personas"]}
         assert not state["settings"]["enabled"] and not state["settings"]["whitelist_enabled"]
         assert "fixture-secret" not in json.dumps(state)
         checks.append("real Context registration + native PluginRequest/JSONResponse + safe defaults")
-        settings = {"enabled": True, "schedule_provider_id": "offline-schedule", "reply_provider_id": "offline-reply"}
+        settings = {"enabled": True, "schedule_provider_id": "offline-schedule", "reply_provider_id": "offline-reply",
+                    "diary_provider_id": "offline-diary", "canvas_integration_enabled": True}
         await request_api("settings", "POST", settings)
         provider_data = await request_api("providers")
         assert "fixture-secret" not in json.dumps(provider_data)
@@ -169,6 +297,10 @@ async def run_smoke(isolation: Path):
         assert schedule_provider.calls and not reply_provider.calls
         checks.append("real PersonaManager + SQLite conversations + schedule provider selection")
         plan["slots"][0]["status"] = "busy"
+        blocked_proactive = await plugin.get_proactive_context(umo)
+        assert blocked_proactive["applicable"] and not blocked_proactive["allowed"]
+        assert blocked_proactive["status"] == "busy" and blocked_proactive["cid"] == cid
+        assert not recording.sent and not plugin.store.data["queues"]
 
         def event(text):
             message = AstrBotMessage()
@@ -186,6 +318,12 @@ async def run_smoke(isolation: Path):
         await plugin._session_tick(umo, session)
         assert not recording.sent and not reply_provider.calls
         plan["slots"][0]["status"] = "free"
+        permitted_proactive = await plugin.get_proactive_context(umo)
+        assert permitted_proactive["applicable"] and permitted_proactive["allowed"]
+        assert permitted_proactive["status"] == "free" and plan["summary"] in permitted_proactive["prompt"]
+        assert permitted_proactive["context_key"] != blocked_proactive["context_key"]
+        assert not recording.sent
+        checks.append("real SDK persona/session proactive context + busy cancellation + schedule prompt without sending")
         await plugin._session_tick(umo, session)
         await plugin._session_tick(umo, session)
         assert len(recording.sent) == 1 and len(reply_provider.calls) == 1
@@ -194,11 +332,43 @@ async def run_smoke(isolation: Path):
         assert "看到你留下的两条消息" in json.dumps(json.loads(history.history), ensure_ascii=False)
         checks.append("real AstrMessageEvent stop + busy silence + single aggregate local delivery + SQLite history")
 
+        # Save a completed local day, then exercise the actual worker path. A
+        # diary archives role life only; it must neither send nor append chat.
+        yesterday = (datetime.now(ZoneInfo("Asia/Shanghai")).date() - timedelta(days=1)).isoformat()
+        record = plugin.store.data["personas"][persona["id"]]
+        record["days"][yesterday] = {**copy.deepcopy(plan), "date": yesterday}
+        before = (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent), history.history)
+        await plugin.tick()
+        await asyncio.wait_for(asyncio.gather(*list(plugin.tasks)), timeout=5)
+        archived = plugin.store.data["diaries"][persona["id"]][yesterday]
+        assert archived["revision"] == 1 and len(diary_provider.calls) == 1
+        assert archived["source"]["schedule"]["date"] == yesterday
+        await plugin.tick()
+        await asyncio.wait_for(asyncio.gather(*list(plugin.tasks)), timeout=5)
+        assert len(diary_provider.calls) == 1
+        archive = await request_api("diary", payload={"persona_id": persona["id"], "date": yesterday})
+        assert archive["entries"][0]["date"] == yesterday and archive["entry"]["content"] == archived["content"]
+        assert "persona_key" not in archive["entry"] and archive["can_generate"]
+        current = await request_api("diary", payload={"persona_id": persona["id"], "date": day})
+        assert not current["can_generate"] and current["entry"] is None
+        assert before == (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent),
+                          (await conversations.get_conversation(umo, cid)).history)
+        assert "fixture-secret" not in json.dumps(archive)
+        checks.append("real worker completed-day diary once + independent provider + read-only archive API + unchanged chat history")
+
+        job = await request_api("generate", "POST", {"persona_id": persona["id"], "date": yesterday, "scope": "diary"})
+        await asyncio.wait_for(asyncio.gather(*list(plugin.tasks)), timeout=5)
+        complete = await request_api("job", payload={"id": job["job_id"]})
+        assert complete["status"] == "done" and complete["progress"] == 100
+        assert plugin.store.data["diaries"][persona["id"]][yesterday]["revision"] == 2
+        assert len(diary_provider.calls) == 2 and len(recording.sent) == before[2]
+        checks.append("native diary regeneration job + atomic revisioned archive without platform delivery")
+
         await plugin.initialize()
         await asyncio.sleep(0.05)
-        before = (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent))
+        before = (len(schedule_provider.calls), len(reply_provider.calls), len(diary_provider.calls), len(recording.sent))
         diagnostics = await request_api("diagnostics", payload={"umo": umo})
-        assert before == (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent))
+        assert before == (len(schedule_provider.calls), len(reply_provider.calls), len(diary_provider.calls), len(recording.sent))
         assert "fixture-secret" not in json.dumps(diagnostics)
         assert diagnostics["worker"]["state"] == "running" and diagnostics["worker"]["last_tick"]
         checks.append("real worker lifecycle + read-only diagnostics without model invocation or extra delivery")

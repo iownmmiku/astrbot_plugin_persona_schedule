@@ -27,7 +27,7 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动和合并补回消息", "0.3.0")
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.1")
 class PersonaSchedule(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -37,6 +37,8 @@ class PersonaSchedule(Star):
         self.store.save()
         self.generator = Generator(context, self.store)
         self.persona_locks, self.session_locks = {}, {}
+        self.diary_locks, self.diary_tasks = {}, {}
+        self.plan_tasks = {}
         self.tasks = set()
         self.jobs = self.store.data.setdefault("jobs", {})
         for job in self.jobs.values():
@@ -88,6 +90,11 @@ class PersonaSchedule(Star):
         return {"id": pid, "prompt": prompt, "key": digest({"id": pid, "prompt": prompt})}
 
     async def environment(self, umo, platform_name="", conversation=None):
+        if not platform_name:
+            getter = getattr(self.context, "get_platform_inst", None)
+            platform = await maybe_await(getter(umo.split(":", 1)[0])) if callable(getter) else None
+            if platform:
+                platform_name = str(field(await maybe_await(platform.meta()), "name", "") or "")
         manager = self.context.conversation_manager
         cid = field(conversation, "cid")
         if conversation is None:
@@ -142,12 +149,16 @@ class PersonaSchedule(Star):
         for old in sorted(archive)[:-90]:
             archive.pop(old)
 
-    async def ensure(self, persona, umo="", day="", *, force="", progress=None):
+    async def ensure(self, persona, umo="", day="", *, force="", progress=None, automatic=False):
+        def inactive():
+            return automatic and not (self.store.settings["enabled"] and self.store.settings["auto_schedule_enabled"])
         def stage(name, percent, message):
             if progress:
                 progress(name, percent, message)
         stage("waiting", 5, "等待角色档案生成锁")
         async with self._lock(self.persona_locks, persona["id"]):
+            if inactive():
+                return None
             original = self._record(persona)
             record = copy.deepcopy(original)
             changed = bool(force)
@@ -157,6 +168,8 @@ class PersonaSchedule(Star):
             if record["profile"] is None:
                 stage("profile", 15, "分析人设与每周生活节奏")
                 async with self.generation_slots:
+                    if inactive():
+                        return None
                     record["profile"] = await self.generator.profile(persona, umo)
                 old_weekly = (original.get("profile") or {}).get("weekly", [])
                 record["profile"]["weekly"] = merge_locked_slots(record["profile"]["weekly"], old_weekly, weekly=True)
@@ -172,6 +185,8 @@ class PersonaSchedule(Star):
             if year not in record["calendars"]:
                 stage("calendar", 40, "整理节庆、休假与世界观活动；已启用时检索参考资料")
                 async with self.generation_slots:
+                    if inactive():
+                        return None
                     record["calendars"][year] = await self.generator.calendar(persona, profile, int(year), umo)
                 changed = True
                 # Keep the previous/current/next annual calendars.
@@ -185,6 +200,8 @@ class PersonaSchedule(Star):
                 stage("day", 70, "编排当天日程并保留锁定时段")
                 recent = [{"date": k, "summary": v["summary"]} for k, v in sorted(record["days"].items()) if k < day][-3:]
                 async with self.generation_slots:
+                    if inactive():
+                        return None
                     record["days"][day] = await self.generator.day(persona, profile, record["calendars"][year], day, recent, umo)
                 # A date-specific lock takes precedence over the weekly lock.
                 base = merge_locked_slots(weekly_for_day(profile, day), record["locked_days"].get(day, []))
@@ -193,6 +210,8 @@ class PersonaSchedule(Star):
                 for old in sorted(record["days"])[:-45]:
                     del record["days"][old]
             if changed:
+                if inactive():
+                    return None
                 # Commit all generated pieces together. A failed rebuild leaves
                 # previously edited profiles/calendars/schedules intact.
                 stage("saving", 95, "校验并保存完整日程")
@@ -201,6 +220,179 @@ class PersonaSchedule(Star):
             else:
                 record = original
             return record["profile"], record["calendars"][year], record["days"][day]
+
+    def _schedule_plans(self, now):
+        settings = self.store.settings
+        if not settings["auto_schedule_enabled"]:
+            return
+        selected = settings["auto_schedule_personas"] or [pid for pid, record in self.store.data["personas"].items() if record.get("profile")]
+        for pid in selected:
+            if pid in self.plan_tasks and not self.plan_tasks[pid].done():
+                continue
+            if self.failures.get("plan:" + pid, 0) > now or any(j["persona_id"] == pid and j["status"] == "running" for j in self.jobs.values()):
+                continue
+            record = self.store.data["personas"].get(pid, {})
+            tz = (record.get("profile") or {}).get("timezone", settings["timezone"])
+            local = datetime.fromtimestamp(now, ZoneInfo(tz))
+            if local.strftime("%H:%M") < settings["auto_schedule_time"] or local.date().isoformat() in record.get("days", {}):
+                continue
+            self.plan_tasks[pid] = self._spawn(self._automatic_plan(pid), "schedule-plan-" + digest(pid))
+
+    async def _automatic_plan(self, pid):
+        try:
+            persona = await self._persona(pid)
+            session = next((s for s in self.store.data["sessions"].values() if s["persona_id"] == pid), {})
+            result = await self.ensure(persona, session.get("umo", ""), automatic=True)
+            if result:
+                self.store.log(f"已主动生成 {pid} 的 {result[2]['date']} 日程")
+        except Exception as exc:
+            self._report_failure("plan:" + pid, exc)
+
+    async def get_proactive_context(self, umo):
+        """Optional public integration for Persona Canvas; never queues a push.
+
+        Read cached plans before its decision and immediately before send.
+        The caller must cancel when allowed=False or context_key has changed.
+        """
+        settings = self.store.settings
+        inactive = {"enabled": settings["canvas_integration_enabled"], "applicable": False,
+                    "allowed": True, "status": "unavailable", "prompt": "", "reason": "联动未启用或会话不在日程控制范围", "context_key": ""}
+        if not settings["canvas_integration_enabled"] or not allowed(settings, umo):
+            return inactive
+        unavailable = {**inactive, "applicable": True, "allowed": False, "reason": "当前日程不可用，已跳过这次主动联系"}
+        try:
+            session = self.store.data["sessions"].get(umo, {})
+            env = await self.environment(umo, session.get("platform", ""))
+            if not env:
+                return {**inactive, "reason": "当前会话没有生效人设"}
+            record = self.store.data["personas"].get(env["persona"]["id"], {})
+            if record.get("key") != env["persona"]["key"] or not record.get("profile"):
+                return unavailable
+            profile = record["profile"]
+            day = datetime.now(ZoneInfo(profile["timezone"])).date().isoformat()
+            schedule = record["days"].get(day)
+            if not schedule:
+                return unavailable
+            current = await self.environment(umo, session.get("platform", ""))
+            if not current or current["persona"]["key"] != env["persona"]["key"] or current["cid"] != env["cid"]:
+                return {**unavailable, "reason": "人设或对话已切换，已取消旧主动内容"}
+            if not self.store.settings["canvas_integration_enabled"] or not allowed(self.store.settings, umo):
+                return {**inactive, "reason": "联动设置已变化"}
+            # environment() awaits the database. WebUI edits may have replaced
+            # the plan in that gap, so read the latest snapshot after all awaits.
+            record = self.store.data["personas"].get(env["persona"]["id"], {})
+            if record.get("key") != env["persona"]["key"] or not record.get("profile"):
+                return unavailable
+            profile = record["profile"]
+            now = datetime.now(ZoneInfo(profile["timezone"]))
+            schedule = record["days"].get(now.date().isoformat())
+            if not schedule:
+                return unavailable
+            if schedule["date"] != now.date().isoformat():
+                return unavailable
+            slot, end = slot_at(schedule, now)
+            data = {"persona_id": env["persona"]["id"], "persona_key": env["persona"]["key"], "cid": env["cid"],
+                    "date": schedule["date"], "timezone": profile["timezone"], "summary": schedule["summary"],
+                    "activity": slot, "events": schedule["events"]}
+            return {**unavailable, "allowed": slot["status"] != "busy", "status": slot["status"],
+                    "persona_id": env["persona"]["id"], "persona_key": env["persona"]["key"], "cid": env["cid"],
+                    "date": schedule["date"], "context_key": digest(data), "activity_end": end,
+                    "reason": "角色忙碌，取消本次主动联系" if slot["status"] == "busy" else "当前可主动联系",
+                    "prompt": "\n[角色日程资料，仅作生活背景]\n" + json.dumps(data, ensure_ascii=False) +
+                              "\n主动回复及照片的场景、服装、动作应符合当前活动和当天事件，不得声称正在做相冲突的事情。半忙时简短自然，不必逐条报告日程。"}
+        except Exception as exc:
+            self._report_failure("canvas:" + digest(umo), exc)
+            return unavailable
+
+    def _diary_source(self, persona, day):
+        record = self.store.data["personas"].get(persona["id"], {})
+        if record.get("key") != persona["key"]:
+            raise ValueError("人设已变化，请先生成新日程；历史日记仍可查看")
+        profile, schedule = record.get("profile"), record.get("days", {}).get(day)
+        if not profile or not schedule:
+            archived = self.store.data["diaries"].get(persona["id"], {}).get(day, {})
+            if archived.get("persona_key") == persona["key"]:
+                source = archived.get("source", {})
+                profile, schedule = source.get("profile"), source.get("schedule")
+        if not profile or not schedule:
+            raise ValueError("这一天没有已保存的日程，不能凭空补写日记")
+        profile = {k: v for k, v in profile.items() if k != "weekly"}
+        return copy.deepcopy({"profile": profile, "schedule": schedule})
+
+    def _check_diary_date(self, persona, day):
+        self._year(day)
+        source = self._diary_source(persona, day)
+        tz = source["schedule"].get("timezone") or source["profile"]["timezone"]
+        if day >= datetime.now(ZoneInfo(tz)).date().isoformat():
+            raise ValueError("这一天尚未结束，请等角色当地日期结束后写日记")
+        return source, tz
+
+    async def ensure_diary(self, persona, day, umo="", *, force=False, automatic=False, progress=None):
+        # A separate lock avoids duplicate automatic/manual writes. Snapshot and
+        # commit hold the persona lock briefly; a diary never blocks chat LLMs.
+        async with self._lock(self.diary_locks, persona["id"]):
+            if automatic and not (self.store.settings["enabled"] and self.store.settings["diary_enabled"]):
+                return None
+            entries = self.store.data["diaries"].setdefault(persona["id"], {})
+            previous = entries.get(day)
+            if previous and not force:
+                return previous
+            async with self._lock(self.persona_locks, persona["id"]):
+                source, tz = self._check_diary_date(persona, day)
+            if progress:
+                progress("diary", 40, "回顾已结束的日程，按角色语气写日记")
+            recent = [{"date": d, "title": e["title"], "content": e["content"][:1200]}
+                      for d, e in sorted(entries.items()) if d < day and e.get("persona_key") == persona["key"]][-2:]
+            async with self.generation_slots:
+                if automatic and not (self.store.settings["enabled"] and self.store.settings["diary_enabled"]):
+                    return None
+                value = await self.generator.diary(persona, source["profile"], source["schedule"], recent, umo)
+            async with self._lock(self.persona_locks, persona["id"]):
+                if automatic and not (self.store.settings["enabled"] and self.store.settings["diary_enabled"]):
+                    return None
+                current_persona = await self._persona(persona["id"])
+                if current_persona["key"] != persona["key"] or digest(self._diary_source(persona, day)) != digest(source):
+                    raise ValueError("生成期间人设或当天日程已变化，已保留旧日记，请重试")
+                if progress:
+                    progress("saving", 95, "归档日记与当天日程快照")
+                now = time.time()
+                entry = {**value, "date": day, "timezone": tz, "persona_key": persona["key"],
+                         "created_at": previous["created_at"] if previous else now, "updated_at": now,
+                         "revision": previous.get("revision", 0) + 1 if previous else 1, "source": source}
+                entries[day] = entry
+                for old in sorted(entries)[:-self.store.settings["diary_limit"]]:
+                    del entries[old]
+                self.store.log(f"已归档 {persona['id']} 的 {day} 日记")
+                return entry
+
+    def _schedule_diaries(self, now):
+        if not self.store.settings["diary_enabled"]:
+            return
+        for pid, record in list(self.store.data["personas"].items()):
+            if pid in self.diary_tasks and not self.diary_tasks[pid].done():
+                continue
+            if not record.get("profile") or any(j["persona_id"] == pid and j["status"] == "running" for j in self.jobs.values()):
+                continue
+            entries = self.store.data["diaries"].get(pid, {})
+            # Catch up recent saved days after downtime, one per persona/tick.
+            # Missing plans are never generated retrospectively for this task.
+            pending = []
+            for d, schedule in sorted(record["days"].items(), reverse=True):
+                tz = schedule.get("timezone") or record["profile"]["timezone"]
+                today = datetime.fromtimestamp(now, ZoneInfo(tz)).date()
+                if ((today - timedelta(days=7)).isoformat() <= d < today.isoformat()
+                        and d not in entries and self.failures.get(f"diary:{pid}:{d}", 0) <= now):
+                    pending.append(d)
+            if pending:
+                self.diary_tasks[pid] = self._spawn(self._automatic_diary(pid, pending[0]), "schedule-diary-" + digest(pid))
+
+    async def _automatic_diary(self, pid, day):
+        try:
+            persona = await self._persona(pid)
+            session = next((s for s in self.store.data["sessions"].values() if s["persona_id"] == pid), {})
+            await self.ensure_diary(persona, day, session.get("umo", ""), automatic=True)
+        except Exception as exc:
+            self._report_failure(f"diary:{pid}:{day}", exc)
 
     def _remember_session(self, env, title=""):
         sessions = self.store.data["sessions"]
@@ -222,7 +414,8 @@ class PersonaSchedule(Star):
         now = time.time()
         if self.failures.get(key, 0) < now:
             self.failures[key] = now + 300
-            message = f"日程处理失败（{type(exc).__name__}），5 分钟后重试；请检查模型和配置"
+            operation = "日记归档" if key.startswith("diary:") else "主动日程生成" if key.startswith("plan:") else "日程处理"
+            message = f"{operation}失败（{type(exc).__name__}），5 分钟后重试；请检查模型和配置"
             self.store.log(message)
             logger.warning("[角色日程] %s", message)
 
@@ -301,6 +494,8 @@ class PersonaSchedule(Star):
             self.store.log("已逐条清理超过保留期限的留言，保留期限内的新留言")
         if not self.store.settings["enabled"]:
             return
+        self._schedule_plans(now)
+        self._schedule_diaries(now)
         for umo, session in list(self.store.data["sessions"].items()):
             if not allowed(self.store.settings, umo) or self.failures.get(umo, 0) > now:
                 continue
@@ -329,9 +524,9 @@ class PersonaSchedule(Star):
                     queue.update(delivery="paused", reason="对话或人设已切换，请清除旧队列")
                     self.store.save()
                     return
-                profile, _, schedule = await self.ensure(env["persona"], umo)
                 if not queue or queue["delivery"] in {"uncertain", "paused", "sending"}:
                     return
+                profile, _, schedule = await self.ensure(env["persona"], umo)
                 if queue.get("retry_after", 0) > time.time():
                     return
                 now = datetime.now(ZoneInfo(profile["timezone"]))
@@ -495,7 +690,7 @@ class PersonaSchedule(Star):
                   "detail": ("GET", self.web_detail), "generate": ("POST", self.web_generate),
                   "job": ("GET", self.web_job), "save": ("POST", self.web_save),
                   "queue": ("POST", self.web_queue), "providers": ("GET", self.web_providers),
-                  "diagnostics": ("GET", self.web_diagnostics)}
+                  "diagnostics": ("GET", self.web_diagnostics), "diary": ("GET", self.web_diary)}
         for path, (method, handler) in routes.items():
             self.context.register_web_api(f"/{NAME}/{path}", self._web_handler(handler, method), [method], "角色日程 · " + path)
         self.web_available = True
@@ -623,7 +818,8 @@ class PersonaSchedule(Star):
             rows.append(row)
         settings = self.store.settings
         return {"worker": self._worker_status(), "web_available": self.web_available,
-                "models": {key: settings[key] or settings["provider_id"] for key in ("schedule_provider_id", "reply_provider_id")},
+                "models": {key: settings[key] or (settings["schedule_provider_id"] if key == "diary_provider_id" else "") or settings["provider_id"]
+                           for key in ("schedule_provider_id", "reply_provider_id", "diary_provider_id")},
                 "sessions": rows, "truncated": len(sessions) > 50, "checked_at": time.time(),
                 "integration_mode": "live" if type(self.context).__module__.startswith("astrbot.") else "unknown"}
 
@@ -681,6 +877,32 @@ class PersonaSchedule(Star):
         return {"persona_id": persona["id"], "profile": record["profile"],
                 "calendar": record["calendars"].get(str(year)), "day": record["days"].get(day)}
 
+    async def web_diary(self, payload):
+        persona = await self._persona(str(payload.get("persona_id", "")))
+        day = str(payload.get("date", ""))
+        if day:
+            self._year(day)
+        record = self.store.data["personas"].get(persona["id"], {})
+        tz = (record.get("profile") or {}).get("timezone", self.store.settings["timezone"])
+        today = datetime.now(ZoneInfo(tz)).date().isoformat()
+        entries = self.store.data["diaries"].get(persona["id"], {})
+        entry = copy.deepcopy(entries.get(day))
+        if entry:
+            entry["persona_changed"] = entry.get("persona_key") != persona["key"]
+            entry.pop("persona_key", None)
+        can_generate, reason = False, ""
+        if day:
+            try:
+                self._check_diary_date(persona, day)
+                can_generate = True
+            except ValueError as exc:
+                reason = str(exc)
+        return {"persona_id": persona["id"], "date": day, "today": today, "timezone": tz,
+                "automatic": self.store.settings["enabled"] and self.store.settings["diary_enabled"],
+                "can_generate": can_generate, "reason": reason, "entry": entry,
+                "entries": [{"date": d, "title": e["title"], "mood": e.get("mood", ""),
+                             "updated_at": e["updated_at"]} for d, e in sorted(entries.items(), reverse=True)]}
+
     def _year(self, day):
         year = date.fromisoformat(day).year
         if not 1970 <= year <= 2100:
@@ -693,8 +915,10 @@ class PersonaSchedule(Star):
         if day:
             self._year(day)
         force = str(payload.get("scope", "day"))
-        if force not in {"profile", "calendar", "day"}:
+        if force not in {"profile", "calendar", "day", "diary"}:
             raise ValueError("生成范围无效")
+        if force == "diary":
+            self._check_diary_date(persona, day)
         for job in self.jobs.values():
             if job["persona_id"] == persona["id"] and job["status"] == "running":
                 return {"job_id": job["id"]}
@@ -707,15 +931,18 @@ class PersonaSchedule(Star):
         session = next((s for s in self.store.data["sessions"].values() if s["persona_id"] == persona["id"]), {})
         async def generate_job():
             try:
-                await self.ensure(persona, session.get("umo", ""), day, force=force,
-                                  progress=lambda stage, percent, message: self._update_job(job, stage, percent, message))
+                progress = lambda stage, percent, message: self._update_job(job, stage, percent, message)
+                if force == "diary":
+                    await self.ensure_diary(persona, day, session.get("umo", ""), force=True, progress=progress)
+                else:
+                    await self.ensure(persona, session.get("umo", ""), day, force=force, progress=progress)
                 self._update_job(job, "done", 100, "生成完成", status="done")
                 self.failures.clear()
             except asyncio.CancelledError:
                 self._update_job(job, "interrupted", job["progress"], "生成任务已中断；原日程仍保留，请重新生成", status="failed")
                 raise
             except Exception as exc:
-                phase = {"profile": "人设与周表", "calendar": "年度活动", "day": "当天日程", "saving": "保存校验"}.get(job["stage"], "生成")
+                phase = {"profile": "人设与周表", "calendar": "年度活动", "day": "当天日程", "diary": "当天日记", "saving": "保存校验"}.get(job["stage"], "生成")
                 detail = "模型调用超时，可调整超时或更换模型" if isinstance(exc, TimeoutError) else "请检查所选聊天模型、输出格式和配置"
                 self._update_job(job, job["stage"], job["progress"], f"{phase}失败（{type(exc).__name__}）；{detail}", status="failed")
                 self._report_failure("job", exc)
@@ -773,6 +1000,7 @@ class PersonaSchedule(Star):
                 slots = validate_slots(value.get("slots"))
                 old = record["days"].get(day, {})
                 record["days"][day] = {"date": day, "slots": slots,
+                    "timezone": (record.get("profile") or {}).get("timezone", self.store.settings["timezone"]),
                     "summary": str(value.get("summary", "手动日程"))[:1000], "origin": "manual",
                     "revision": old.get("revision", 0) + 1,
                     "events": active_events(record["calendars"].get(str(year), {}).get("events", []), day)}

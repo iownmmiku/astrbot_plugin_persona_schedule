@@ -16,6 +16,13 @@ DEFAULTS = {
     "provider_id": "",
     "schedule_provider_id": "",
     "reply_provider_id": "",
+    "diary_provider_id": "",
+    "diary_enabled": True,
+    "diary_limit": 180,
+    "auto_schedule_enabled": True,
+    "auto_schedule_time": "00:00",
+    "auto_schedule_personas": [],
+    "canvas_integration_enabled": False,
     "timezone": "Asia/Shanghai",
     "slow_min_seconds": 60,
     "slow_max_seconds": 180,
@@ -249,13 +256,21 @@ def validate_settings(payload, previous):
     if not isinstance(payload, dict):
         raise ValueError("设置必须为对象")
     result = copy.deepcopy(previous)
-    for key in ("enabled", "whitelist_enabled", "search_enabled"):
+    for key in ("enabled", "whitelist_enabled", "search_enabled", "diary_enabled", "auto_schedule_enabled", "canvas_integration_enabled"):
         if key in payload:
             result[key] = boolean(payload[key])
-    for key in ("provider_id", "schedule_provider_id", "reply_provider_id", "timezone", "tavily_api_key"):
+    for key in ("provider_id", "schedule_provider_id", "reply_provider_id", "diary_provider_id", "timezone", "tavily_api_key"):
         if key in payload:
             result[key] = text(payload[key], 500)
     ZoneInfo(result["timezone"])
+    if "auto_schedule_time" in payload:
+        minute(payload["auto_schedule_time"])
+        result["auto_schedule_time"] = payload["auto_schedule_time"]
+    if "auto_schedule_personas" in payload:
+        rows = payload["auto_schedule_personas"]
+        if not isinstance(rows, list) or len(rows) > 2000 or any(not isinstance(p, str) or not p.strip() or len(p) > 300 for p in rows):
+            raise ValueError("主动日程人设应为有效的人设 ID 列表")
+        result["auto_schedule_personas"] = sorted(set(p.strip() for p in rows))
     if "whitelist" in payload:
         rows = payload["whitelist"]
         if not isinstance(rows, list) or len(rows) > 2000 or any(not isinstance(u, str) or len(u) > 300 or u.count(":") < 2 for u in rows):
@@ -263,7 +278,7 @@ def validate_settings(payload, previous):
         result["whitelist"] = sorted(set(rows))
     bounds = {"slow_min_seconds": (5, 3600), "slow_max_seconds": (5, 7200),
               "tick_seconds": (5, 60), "timeout_seconds": (10, 300),
-              "queue_limit": (5, 200), "queue_expire_hours": (1, 168)}
+              "queue_limit": (5, 200), "queue_expire_hours": (1, 168), "diary_limit": (7, 1095)}
     for key, (low, high) in bounds.items():
         if key in payload:
             value = payload[key]
@@ -283,7 +298,7 @@ class Store:
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "state.json"
         self.data = {"settings": copy.deepcopy(DEFAULTS), "personas": {}, "sessions": {}, "queues": {}, "logs": [],
-                     "expired_messages": 0}
+                     "expired_messages": 0, "diaries": {}}
         if self.path.exists():
             # Do not overwrite a damaged file with empty data.
             loaded = json.loads(self.path.read_text(encoding="utf-8"))

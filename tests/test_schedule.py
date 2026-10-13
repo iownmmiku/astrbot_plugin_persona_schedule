@@ -139,6 +139,8 @@ class FakeContext:
             value = {"events": []}
         elif "生成给定日期" in instruction:
             value = {"summary": "旅人的一天", "slots": slots()}
+        elif "第一人称生活日记" in instruction:
+            value = {"title": "路上的一日", "mood": "平静", "content": "今天沿着熟悉的路慢慢走，回到住处时，我把沿途的风景记了下来。"}
         else:
             return types.SimpleNamespace(completion_text="刚才在路上，看到你说的了，等我回去一起聊。")
         return types.SimpleNamespace(completion_text=json.dumps(value, ensure_ascii=False))
@@ -455,7 +457,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_registered_web_routes_use_plugin_prefix(self):
         self.assertEqual({r[0].rsplit('/',1)[-1] for r in self.ctx.routes},
-                         {'state','settings','detail','generate','job','save','queue','providers','diagnostics'})
+                         {'state','settings','detail','generate','job','save','queue','providers','diagnostics','diary'})
         self.assertTrue(all(r[0].startswith('/'+NAME+'/') for r in self.ctx.routes))
 
     async def test_cached_schedule_is_stable_and_no_extra_model_calls(self):

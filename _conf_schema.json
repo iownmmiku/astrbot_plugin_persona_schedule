@@ -9,13 +9,19 @@
     "description": "启用对话白名单",
     "type": "bool",
     "default": false,
-    "hint": "开启后仅选择的会话生效；推荐在可视化视图中勾选对话。"
+    "hint": "开启后仅白名单会话生效；白名单为空时不控制任何聊天。关闭此项也不会自动启用所有聊天。"
   },
   "whitelist": {
     "description": "对话白名单（会话来源 ID）",
     "type": "list",
     "default": [],
-    "hint": "会话来源 ID，可通过 /日程会话 获取。"
+    "hint": "会话来源 ID，可通过 /日程会话 获取；启用白名单但此列表为空时，不控制任何聊天。"
+  },
+  "all_chats_enabled": {
+    "description": "明确启用所有聊天",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。仅在关闭对话白名单且明确开启本项时，日程才控制所有聊天。可在 WebUI 的对话控制范围中选择。"
   },
   "provider_id": {
     "description": "旧版共用聊天模型（兼容配置）",
@@ -128,5 +134,41 @@
     "type": "bool",
     "default": false,
     "hint": "需要随想画卷 0.5.8+；忙碌时取消主动回复/照片（不排队），允许时内容参考日程。遵守日程插件与会话白名单开关。"
+  },
+  "adaptive_enabled": {
+    "description": "让对话影响日程",
+    "type": "bool",
+    "default": true,
+    "hint": "使用日程生成模型，在临近/进入忙碌时权衡本会话与活动轻重；可有限延后个人安排，固定职责和锁定时段受保护。"
+  },
+  "transition_notice_enabled": {
+    "description": "忙碌前自然打招呼",
+    "type": "bool",
+    "default": true,
+    "hint": "仅向近期真正聊过的受控会话提前告知；同一预告不重复，调整后按新截止告知，不向久未聊天的人推送。"
+  },
+  "transition_notice_minutes": {
+    "description": "忙碌前提前告知时间（分钟）",
+    "type": "int",
+    "default": 10,
+    "hint": "1～60 分钟。临近忙碌活动时，在回复中自然提起稍后的安排，必要时主动告知近期活跃会话。"
+  },
+  "adaptive_max_delay_minutes": {
+    "description": "活动最多延后时间（分钟）",
+    "type": "int",
+    "default": 30,
+    "hint": "1～120 分钟。按会话临时调整，不改写基础日程，不无限延后，也不会延后锁定时段。"
+  },
+  "adaptive_review_interval_seconds": {
+    "description": "弹性日程重新判断间隔（秒）",
+    "type": "int",
+    "default": 180,
+    "hint": "30～1800 秒。限制同一活动的模型重新判断频率，避免每条消息都重复调用。"
+  },
+  "active_conversation_minutes": {
+    "description": "近期活跃对话范围（分钟）",
+    "type": "int",
+    "default": 10,
+    "hint": "1～60 分钟。用于识别持续聊天及主动提前告知；忙碌时新消息仍可评估是否紧急，不会自动算作持续聊天。"
   }
 }

@@ -24,7 +24,7 @@ class RuntimeExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.ctx.get_all_providers = lambda: [self.provider(pid, pid + "-model") for pid in
                                                ("plan-provider", "reply-provider", "legacy-provider", "fake-provider")]
         with patch("astrbot_plugin_persona_schedule.main.StarTools.get_data_dir", return_value=self.temp.name):
-            self.plugin = PersonaSchedule(self.ctx, FakeConfig())
+            self.plugin = PersonaSchedule(self.ctx, FakeConfig({"all_chats_enabled": True, "adaptive_enabled": False, "transition_notice_enabled": False}))
         self.persona = await self.plugin._persona("traveler")
         self.day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
 
@@ -179,7 +179,7 @@ class RuntimeExtensionTests(unittest.IsolatedAsyncioTestCase):
             "scope": "day", "status": "running", "stage": "day", "progress": 70, "message": "处理中"}
         self.plugin.store.save()
         with patch("astrbot_plugin_persona_schedule.main.StarTools.get_data_dir", return_value=self.temp.name):
-            restarted = PersonaSchedule(self.ctx, FakeConfig())
+            restarted = PersonaSchedule(self.ctx, FakeConfig({"all_chats_enabled": True, "adaptive_enabled": False, "transition_notice_enabled": False}))
         try:
             result = await restarted.web_job({"id": "persisted-job"})
             self.assertEqual(result["status"], "failed")
@@ -300,7 +300,7 @@ class RuntimeExtensionTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin._session_tick(UMO, self.plugin.store.data["sessions"][UMO])
         health = dict(self.plugin.store.data["delivery_health"][UMO])
         with patch("astrbot_plugin_persona_schedule.main.StarTools.get_data_dir", return_value=self.temp.name):
-            restarted = PersonaSchedule(self.ctx, FakeConfig())
+            restarted = PersonaSchedule(self.ctx, FakeConfig({"all_chats_enabled": True, "adaptive_enabled": False, "transition_notice_enabled": False}))
         try:
             self.assertEqual(restarted.store.data["delivery_health"][UMO], health)
             self.assertTrue(health["verified"])

@@ -13,6 +13,13 @@ DEFAULTS = {
     "enabled": False,
     "whitelist_enabled": False,
     "whitelist": [],
+    "all_chats_enabled": False,
+    "adaptive_enabled": True,
+    "transition_notice_enabled": True,
+    "transition_notice_minutes": 10,
+    "adaptive_max_delay_minutes": 30,
+    "adaptive_review_interval_seconds": 180,
+    "active_conversation_minutes": 10,
     "provider_id": "",
     "schedule_provider_id": "",
     "reply_provider_id": "",
@@ -249,14 +256,19 @@ def slot_at(schedule, now):
 
 
 def allowed(settings, umo):
-    return settings["enabled"] and (not settings["whitelist_enabled"] or umo in settings["whitelist"])
+    if not settings["enabled"]:
+        return False
+    if settings["whitelist_enabled"]:
+        return umo in settings["whitelist"]
+    return bool(settings.get("all_chats_enabled", False))
 
 
 def validate_settings(payload, previous):
     if not isinstance(payload, dict):
         raise ValueError("设置必须为对象")
     result = copy.deepcopy(previous)
-    for key in ("enabled", "whitelist_enabled", "search_enabled", "diary_enabled", "auto_schedule_enabled", "canvas_integration_enabled"):
+    for key in ("enabled", "whitelist_enabled", "all_chats_enabled", "search_enabled", "diary_enabled",
+                "auto_schedule_enabled", "canvas_integration_enabled", "adaptive_enabled", "transition_notice_enabled"):
         if key in payload:
             result[key] = boolean(payload[key])
     for key in ("provider_id", "schedule_provider_id", "reply_provider_id", "diary_provider_id", "timezone", "tavily_api_key"):
@@ -278,7 +290,9 @@ def validate_settings(payload, previous):
         result["whitelist"] = sorted(set(rows))
     bounds = {"slow_min_seconds": (5, 3600), "slow_max_seconds": (5, 7200),
               "tick_seconds": (5, 60), "timeout_seconds": (10, 300),
-              "queue_limit": (5, 200), "queue_expire_hours": (1, 168), "diary_limit": (7, 1095)}
+              "queue_limit": (5, 200), "queue_expire_hours": (1, 168), "diary_limit": (7, 1095),
+              "transition_notice_minutes": (1, 60), "adaptive_max_delay_minutes": (1, 120),
+              "adaptive_review_interval_seconds": (30, 1800), "active_conversation_minutes": (1, 60)}
     for key, (low, high) in bounds.items():
         if key in payload:
             value = payload[key]

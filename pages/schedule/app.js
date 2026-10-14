@@ -199,7 +199,7 @@ function renderDetail() {
   $('profile-preview').textContent=profile ? `${profile.world_name} · ${profile.identity}` : '展开编辑世界观与生活习惯';
   const minutes = t=>Number(t.slice(0,2))*60+Number(t.slice(3));
   $('rhythm-bar').innerHTML=rows.map((r,index)=>`<button class="${escape(r.status)} ${index===current?'current':''}" data-slot-index="${index}" style="flex:${minutes(r.end)-minutes(r.start)}" title="${escape(times(r))} · ${escape(labels[r.status])} · ${escape(r.title)}" aria-label="定位 ${escape(times(r))} ${escape(r.title)}"></button>`).join('');
-  renderDates(); renderMonth();
+  renderDates(); renderMonth(); renderAdaptations();
   $('day-list').innerHTML = rows.length ? slotCards(rows, 'day', current) : empty('当天日程尚未生成', '点击「生成这一天」，自动分析人设并生成档案、活动与日程。');
   $('day-count').textContent = `${String(rows.length).padStart(2,'0')} 个时段`;
   $('week-list').innerHTML = week.length ? slotCards(week, 'week') || empty('这些日子还没有安排','可添加周表时段，保存时需完整覆盖每天。') : empty('周表尚未生成', '生成当天会一并创建基础周表，也可以手动添加并保存。');
@@ -219,6 +219,22 @@ function renderSessions() {
   const sessions = [...state.sessions];
   for (const umo of selected) if (!sessions.some(s=>s.umo===umo)) sessions.push({umo,title:'手动选择的对话'});
   $('session-list').innerHTML = sessions.filter(s=>`${s.umo} ${s.title} ${s.persona_id}`.toLowerCase().includes(q)).map(s=>`<label class="session-row"><input type="checkbox" data-umo="${escape(s.umo)}" ${selected.has(s.umo) ? 'checked' : ''}><span>${escape(s.title || s.umo)}<small>${escape(s.umo)}${s.persona_id ? ' · '+escape(s.persona_id) : ''}</small></span></label>`).join('') || '<div class="hint" style="padding:16px">没有匹配的对话，可先给机器人发一条消息，或粘贴会话来源 ID。</div>';
+  renderChatScope();
+}
+function renderChatScope() {
+  const scope=$('chat-scope').value;
+  $('whitelist-selection').hidden=scope!=='whitelist';
+  $('chat-scope-note').textContent=scope==='all'?'明确选择所有聊天：保存并启用插件后，所有触发聊天的会话都会受日程影响。':scope==='whitelist'?(selected.size?`已选 ${selected.size} 个会话。保存并启用插件后，仅这些聊天受日程影响。`:'白名单为空：不会控制任何聊天。先勾选会话或手动添加来源 ID。'):'不控制任何聊天。日程与日记仍可独立生成，聊天不会因作息而被延迟或取消。';
+}
+function renderAdaptations() {
+  const rows=(state?.adaptation_log || []).filter(r=>r.persona_id===$('persona').value&&r.date===$('date').value).slice(-5).reverse();
+  const actions={delay:'临时延后',defer:'临时延后',postpone:'临时延后',keep:'照常进行',notice:'提前告知',transition_notice:'提前告知',fatigue:'带些倦意',continue:'继续聊一会'};
+  $('adaptation-count').textContent=rows.length?`最近 ${rows.length} 条`:'暂无记录';
+  $('adaptation-list').innerHTML=rows.map(r=>{
+    const session=state.sessions.find(s=>s.umo===r.umo),minutes=Number(r.minutes);
+    const heading=actions[r.action] || '日程判断';
+    return `<article class="adaptation-entry"><div class="adaptation-meta"><span class="badge">${escape(heading)}${Number.isFinite(minutes)&&minutes>0?' · '+escape(minutes)+' 分钟':''}</span><time>${escape(formatInstant(r.at))}</time></div><strong>${escape(r.activity || '当前活动')}</strong><p>${escape(r.reason || '根据当前对话和角色安排作出判断。')}</p><small>${escape(session?.title || r.umo || '受控对话')}${r.until?' · 持续至 '+escape(formatInstant(r.until)):''}</small></article>`;
+  }).join('') || '<p class="hint">这一天还没有对话调整记录。基础安排仍按下方时间表进行。</p>';
 }
 function renderQueues() {
   $('queue-count').textContent = state.queues.reduce((sum,row)=>sum+Number(row.count || 0),0);
@@ -241,8 +257,9 @@ $('refresh-diagnostics').onclick=()=>action(loadDiagnostics);
 $('diagnostic-session').onchange=()=>action(loadDiagnostics);
 function renderSettings() {
   const s = state.settings;
-  for (const [id,key] of Object.entries({enabled:'enabled','whitelist-enabled':'whitelist_enabled','search-enabled':'search_enabled','diary-enabled':'diary_enabled','auto-schedule-enabled':'auto_schedule_enabled','canvas-integration-enabled':'canvas_integration_enabled'})) $(id).checked = Boolean(s[key]);
-  for (const [id,key] of Object.entries({'default-timezone':'timezone','slow-min':'slow_min_seconds','slow-max':'slow_max_seconds','queue-limit':'queue_limit','queue-expire':'queue_expire_hours','diary-limit':'diary_limit'})) $(id).value = s[key];
+  for (const [id,key] of Object.entries({enabled:'enabled','search-enabled':'search_enabled','diary-enabled':'diary_enabled','auto-schedule-enabled':'auto_schedule_enabled','canvas-integration-enabled':'canvas_integration_enabled','adaptive-enabled':'adaptive_enabled','transition-notice-enabled':'transition_notice_enabled'})) $(id).checked = Boolean(s[key]);
+  for (const [id,key] of Object.entries({'default-timezone':'timezone','slow-min':'slow_min_seconds','slow-max':'slow_max_seconds','queue-limit':'queue_limit','queue-expire':'queue_expire_hours','diary-limit':'diary_limit','transition-notice-minutes':'transition_notice_minutes','adaptive-max-delay-minutes':'adaptive_max_delay_minutes','active-conversation-minutes':'active_conversation_minutes','adaptive-review-interval-seconds':'adaptive_review_interval_seconds'})) $(id).value = s[key];
+  $('chat-scope').value=s.whitelist_enabled?'whitelist':s.all_chats_enabled?'all':'none';
   $('auto-schedule-time').value = s.auto_schedule_time || '00:00';
   autoPersonas = new Set(s.auto_schedule_personas || []);
   $('auto-schedule-scope').value = autoPersonas.size ? 'selected' : 'analyzed';
@@ -274,11 +291,12 @@ function normalizeState(data) {
   return {...data,personas:data.personas || [],providers:data.providers || [],queues:data.queues || [],sessions:data.sessions || [],logs:data.logs || [],jobs:data.jobs || []};
 }
 function renderStateStatus() {
-  $('enabled-label').textContent = state.settings.enabled ? (state.settings.whitelist_enabled ? '已启用 · 仅白名单' : '已启用 · 所有对话') : '插件尚未启用';
+  const settings=state.settings,hasScope=settings.whitelist_enabled?Boolean(settings.whitelist?.length):Boolean(settings.all_chats_enabled);
+  $('enabled-label').textContent = settings.enabled ? (settings.whitelist_enabled?(hasScope?'已启用 · 仅白名单':'已启用 · 白名单为空'):settings.all_chats_enabled?'已启用 · 所有聊天':'已启用 · 未控制聊天') : '插件尚未启用';
   document.querySelector('.aside-status').classList.toggle('is-off',!state.settings.enabled);
   const timestamp=state.checked_at || state.runtime?.checked_at || Date.now();
   $('last-updated').textContent=`自动同步 · ${formatInstant(timestamp)} · 每 15 秒更新`;
-  renderQueues();updateLiveStatus();
+  renderQueues();updateLiveStatus();renderAdaptations();
 }
 async function loadState(withSettings = false) {
   state = normalizeState(await api('GET','state'));
@@ -503,13 +521,15 @@ $('save-settings').onclick=()=>action(async()=>{
   const scope=$('auto-schedule-scope').value;
   if(scope==='selected'&&!autoPersonas.size)throw new Error('请至少选择一个主动生成人设，或改用“所有已分析角色”。');
   if(!/^([01]\d|2[0-3]):[0-5]\d$/.test($('auto-schedule-time').value))throw new Error('请输入有效的角色当地生成时间。');
-  const payload={enabled:$('enabled').checked,whitelist_enabled:$('whitelist-enabled').checked,whitelist:[...selected],schedule_provider_id:$('schedule-provider').value,reply_provider_id:$('reply-provider').value,diary_provider_id:$('diary-provider').value,diary_enabled:$('diary-enabled').checked,diary_limit:Number($('diary-limit').value),auto_schedule_enabled:$('auto-schedule-enabled').checked,auto_schedule_time:$('auto-schedule-time').value,auto_schedule_personas:scope==='selected'?[...autoPersonas]:[],canvas_integration_enabled:$('canvas-integration-enabled').checked,timezone:$('default-timezone').value,slow_min_seconds:Number($('slow-min').value),slow_max_seconds:Number($('slow-max').value),queue_limit:Number($('queue-limit').value),queue_expire_hours:Number($('queue-expire').value),search_enabled:$('search-enabled').checked};
+  const chatScope=$('chat-scope').value;
+  const payload={enabled:$('enabled').checked,whitelist_enabled:chatScope==='whitelist',all_chats_enabled:chatScope==='all',whitelist:[...selected],schedule_provider_id:$('schedule-provider').value,reply_provider_id:$('reply-provider').value,diary_provider_id:$('diary-provider').value,diary_enabled:$('diary-enabled').checked,diary_limit:Number($('diary-limit').value),auto_schedule_enabled:$('auto-schedule-enabled').checked,auto_schedule_time:$('auto-schedule-time').value,auto_schedule_personas:scope==='selected'?[...autoPersonas]:[],canvas_integration_enabled:$('canvas-integration-enabled').checked,adaptive_enabled:$('adaptive-enabled').checked,transition_notice_enabled:$('transition-notice-enabled').checked,transition_notice_minutes:Number($('transition-notice-minutes').value),adaptive_max_delay_minutes:Number($('adaptive-max-delay-minutes').value),active_conversation_minutes:Number($('active-conversation-minutes').value),adaptive_review_interval_seconds:Number($('adaptive-review-interval-seconds').value),timezone:$('default-timezone').value,slow_min_seconds:Number($('slow-min').value),slow_max_seconds:Number($('slow-max').value),queue_limit:Number($('queue-limit').value),queue_expire_hours:Number($('queue-expire').value),search_enabled:$('search-enabled').checked};
   if($('clear-key').checked) payload.tavily_api_key=''; else if($('tavily-key').value.trim()) payload.tavily_api_key=$('tavily-key').value.trim();
-  await api('POST','settings',payload); await loadState(true); notice('设置已保存。');
+  await api('POST','settings',payload); await loadState(true); notice(chatScope==='whitelist'&&!selected.size?'设置已保存。白名单为空，当前不会控制任何聊天。':chatScope==='none'?'设置已保存。当前不控制聊天，日程和日记仍可生成。':'设置已保存。');
 });
 $('refresh-models').onclick=()=>action(async()=>{const button=$('refresh-models');button.disabled=true;try {const result=await api('GET','providers');state.providers=result.providers || [];renderProviders(true);notice('已从 AstrBot 获取模型列表。当前未保存的模型选择仍保留。');}finally {button.disabled=false;}});
-$('session-list').addEventListener('change',event=>{if(event.target.dataset.umo) { const u=event.target.dataset.umo; event.target.checked?selected.add(u):selected.delete(u); }});
+$('session-list').addEventListener('change',event=>{if(event.target.dataset.umo) { const u=event.target.dataset.umo; event.target.checked?selected.add(u):selected.delete(u); renderChatScope(); }});
 $('session-search').oninput=renderSessions;
+$('chat-scope').onchange=renderChatScope;
 $('auto-schedule-scope').onchange=renderAutoPersonas;
 $('auto-persona-list').addEventListener('change',event=>{const id=event.target.dataset.autoPersona;if(id){event.target.checked?autoPersonas.add(id):autoPersonas.delete(id);$('auto-persona-count').textContent=`已选 ${autoPersonas.size} 个`;}});
 $('settings').addEventListener('input',event=>{if(event.target.matches('input,select,textarea')&&event.target.id!=='session-search'){dirtySettings=true;renderDraftStatus();}});

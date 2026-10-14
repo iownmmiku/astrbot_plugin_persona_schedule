@@ -51,12 +51,18 @@ async def run_smoke(isolation: Path):
     from astrbot.core.platform.message_type import MessageType
     from astrbot.core.platform.platform import Platform
     from astrbot.core.platform.platform_metadata import PlatformMetadata
-    from astrbot.core.provider.entities import LLMResponse, ProviderMeta
+    from astrbot.core.provider.entities import LLMResponse, ProviderMeta, ProviderRequest
     from astrbot.core.provider.manager import ProviderManager
     from astrbot.core.provider.provider import Provider
     from astrbot.core.umop_config_router import UmopConfigRouter
     from astrbot.core.utils.astrbot_path import get_astrbot_root
     from astrbot.core.star.star_manager import PluginManager
+    from astrbot.core.star.star import star_map
+    from astrbot.core.star.star_handler import star_handlers_registry
+    from astrbot.core.pipeline.context import PipelineContext
+    from astrbot.core.pipeline.waking_check.stage import WakingCheckStage
+    from astrbot.core.pipeline.process_stage.stage import StarRequestSubStage
+    from astrbot.builtin_stars.builtin_commands.main import Main as BuiltinCommands
     from astrbot.dashboard.plugin_page_auth import PluginPageAuth
     from astrbot.dashboard.services.plugin_page_service import PluginPageService, PluginPageServiceError
     from astrbot.dashboard.services.plugin_service import PluginService
@@ -64,6 +70,7 @@ async def run_smoke(isolation: Path):
     from starlette.requests import Request
 
     from astrbot_plugin_persona_schedule.main import NAME, PersonaSchedule
+    from astrbot_plugin_persona_schedule.generator import ADAPTIVE
 
     assert Path(get_astrbot_root()).resolve() == isolation.resolve(), "AstrBot data is not isolated"
     assert ".qa" in isolation.parts, "Smoke data must stay in the workspace QA directory"
@@ -103,6 +110,10 @@ async def run_smoke(isolation: Path):
             elif "第一人称生活日记" in (system_prompt or ""):
                 value = {"title": "旅途的一页", "mood": "平静",
                          "content": "今天在旅途中停下脚步，在住处慢慢休息。我把平静的一天记在这里。"}
+            elif ADAPTIVE in (system_prompt or ""):
+                value = {"action": "defer", "activity_kind": "sleep", "importance": "normal",
+                         "delay_minutes": 30, "reason": "还在延续刚才的话题，稍后再休息。",
+                         "tone": "tired", "notice": "有点困了，再陪你聊一会儿就去睡。"}
             else:
                 return LLMResponse(role="assistant", completion_text="刚才在路上，看到你留下的两条消息了，回来一起聊。")
             return LLMResponse(role="assistant", completion_text=json.dumps(value, ensure_ascii=False))
@@ -282,7 +293,7 @@ async def run_smoke(isolation: Path):
         assert not state["settings"]["enabled"] and not state["settings"]["whitelist_enabled"]
         assert "fixture-secret" not in json.dumps(state)
         checks.append("real Context registration + native PluginRequest/JSONResponse + safe defaults")
-        settings = {"enabled": True, "schedule_provider_id": "offline-schedule", "reply_provider_id": "offline-reply",
+        settings = {"enabled": True, "all_chats_enabled": True, "adaptive_enabled": False, "transition_notice_enabled": False, "schedule_provider_id": "offline-schedule", "reply_provider_id": "offline-reply",
                     "diary_provider_id": "offline-diary", "canvas_integration_enabled": True}
         await request_api("settings", "POST", settings)
         provider_data = await request_api("providers")
@@ -310,6 +321,53 @@ async def run_smoke(isolation: Path):
             message.message, message.message_str, message.raw_message = [Plain(text)], text, {}
             return AstrMessageEvent(text, message, recording.meta(), "smoke-user")
 
+        # Resolve and execute the real built-in reset handler using the SDK's
+        # waking + plugin-dispatch stages. All writes stay in isolated SQLite;
+        # no result-sending stage, external adapter, or remote model is run.
+        builtin = BuiltinCommands(context)
+        for instance in (builtin, plugin):
+            module = type(instance).__module__
+            star_map[module].star_cls = instance
+            star_map[module].activated = True
+            if instance is builtin:
+                star_map[module].name = "builtin_commands"
+                star_map[module].reserved = True
+            for handler in star_handlers_registry.get_handlers_by_module_name(module):
+                handler.handler = getattr(instance, handler.handler_name)
+        command_config = copy.deepcopy(dict(astrbot_config))
+        command_config["wake_prefix"] = ["/"]
+        pipeline = PipelineContext(command_config, None, "offline-command-smoke", db_helper=None)
+        waking, dispatch = WakingCheckStage(), StarRequestSubStage()
+        await waking.initialize(pipeline)
+        await dispatch.initialize(pipeline)
+        reset = event("/reset")
+        before_command = (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent))
+        await waking.process(reset)
+        assert reset.message_str == "reset" and not reset.is_stopped()
+        activated = reset.get_extra("activated_handlers")
+        reset_handler = next(handler for handler in activated
+                             if handler.handler_module_path == type(builtin).__module__
+                             and handler.handler_name == "reset")
+        schedule_handler = next(handler for handler in activated
+                                if handler.handler_module_path == type(plugin).__module__
+                                and handler.handler_name == "intercept_message")
+        assert reset_handler.extras_configs["priority"] == 0
+        assert schedule_handler.extras_configs["priority"] == -100
+        assert activated.index(reset_handler) < activated.index(schedule_handler)
+        assert reset_handler.handler_full_name in reset.get_extra("handlers_parsed_params")
+        results = []
+        async for _ in dispatch.process(reset):
+            if reset.get_result():
+                results.append(reset.get_result().get_plain_text())
+        new_cid = await conversations.get_curr_conversation_id(umo)
+        assert new_cid and new_cid != cid and any("new conversation" in result for result in results)
+        assert (await conversations.get_conversation(umo, new_cid)).persona_id == "offline-traveler"
+        assert reset.get_extra("_clean_group_context_session") and not reset.is_stopped()
+        assert not plugin.store.data["queues"] and not reset.get_extra(NAME + ":queued", False)
+        assert before_command == (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent))
+        cid = new_cid
+        checks.append("real 4.28 waking + priority dispatch + built-in reset updates isolated SQLite while busy; no queue/model/platform call")
+
         for text in ["刚刚在做什么？", "等你有空再一起聊。"]:
             incoming = event(text)
             await plugin.intercept_message(incoming)
@@ -331,6 +389,72 @@ async def run_smoke(isolation: Path):
         history = await conversations.get_conversation(umo, cid)
         assert "看到你留下的两条消息" in json.dumps(json.loads(history.history), ensure_ascii=False)
         checks.append("real AstrMessageEvent stop + busy silence + single aggregate local delivery + SQLite history")
+
+        # Use the actual SDK request/event types to continue a recent chat at
+        # bedtime. Only a session-local contact window may change; the saved
+        # day, SQLite history and recording adapter must remain untouched.
+        saved_plan = copy.deepcopy(plan)
+        saved_settings = copy.deepcopy(plugin.store.settings)
+        saved_dialogue = copy.deepcopy(plugin.dialogue.get(umo))
+        saved_adjustment = copy.deepcopy(plugin.adjustments.get(umo))
+        saved_adaptations = copy.deepcopy(plugin.store.data["adaptation_log"])
+        before_adaptive = (len(schedule_provider.calls), len(reply_provider.calls),
+                           len(diary_provider.calls), len(recording.sent), history.history)
+        try:
+            local_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            start = local_now.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            if start.date() != local_now.date():
+                start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_clock = start.strftime("%H:%M")
+            slots = [] if start_clock == "00:00" else [{"start":"00:00", "end":start_clock,
+                "title":"自己的时间", "status":"free", "note":"离线弹性联调"}]
+            slots.append({"start":start_clock, "end":"24:00", "title":"睡觉",
+                          "status":"busy", "note":"准备休息，手机静音。", "locked":False})
+            plan["slots"] = copy.deepcopy(slots)
+            plugin.store.settings.update(adaptive_enabled=True, adaptive_max_delay_minutes=30)
+            plugin.dialogue[umo] = {"cid":cid, "persona_key":persona["key"],
+                "last_inbound":local_now.timestamp()-60, "reviews":{}, "notices":{}}
+            plugin.adjustments.pop(umo, None)
+            plugin.store.save()
+            continuing = event("刚才说到的那件事，我们再聊一会儿吧。")
+            await plugin.intercept_message(continuing)
+            assert not continuing.is_stopped() and umo not in plugin.store.data["queues"]
+            adjustment = plugin.store.data["contact_adjustments"][umo]
+            assert adjustment["action"] == "defer" and adjustment["tone"] == "tired"
+            assert adjustment["cid"] == cid and adjustment["persona_key"] == persona["key"]
+            assert adjustment["starts_at"] == start.timestamp()
+            assert time.time() < adjustment["until"] <= start.timestamp()+30*60
+            assert len(schedule_provider.calls) == before_adaptive[0]+1
+            adaptive_payload = json.loads(schedule_provider.calls[-1]["prompt"])
+            assert adaptive_payload["active_conversation"] and adaptive_payload["target_activity"]["active"]
+            assert adaptive_payload["target_activity"]["slot"]["status"] == "busy"
+            request = ProviderRequest(prompt=continuing.message_str, system_prompt="原有角色提示。",
+                conversation=await conversations.get_conversation(umo, cid))
+            await plugin.inject_schedule(continuing, request)
+            assert not continuing.is_stopped() and umo not in plugin.store.data["queues"]
+            assert request.system_prompt.startswith("原有角色提示。") and "倦意" in request.system_prompt
+            assert "有限的联系调整" in request.system_prompt
+            assert plugin.adjustments[umo]["until"] == adjustment["until"]
+            assert plan["slots"] == slots and plan["slots"][-1]["status"] == "busy"
+            assert before_adaptive == (len(schedule_provider.calls)-1, len(reply_provider.calls),
+                len(diary_provider.calls), len(recording.sent),
+                (await conversations.get_conversation(umo, cid)).history)
+            checks.append("real SDK ongoing bedtime chat + schedule-model adaptive decision + finite session exception + tired LLM request; unchanged saved day/history/platform")
+        finally:
+            plan.clear()
+            plan.update(saved_plan)
+            plugin.store.settings.clear()
+            plugin.store.settings.update(saved_settings)
+            if saved_dialogue is None:
+                plugin.dialogue.pop(umo, None)
+            else:
+                plugin.dialogue[umo] = saved_dialogue
+            if saved_adjustment is None:
+                plugin.adjustments.pop(umo, None)
+            else:
+                plugin.adjustments[umo] = saved_adjustment
+            plugin.store.data["adaptation_log"] = saved_adaptations
+            plugin.store.save()
 
         # Save a completed local day, then exercise the actual worker path. A
         # diary archives role life only; it must neither send nor append chat.

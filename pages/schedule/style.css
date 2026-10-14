@@ -2591,6 +2591,19 @@ input:not([type="checkbox"]),select,textarea {font-size:13px;min-height:40px}
 .integration-rules>div {display:grid;grid-template-columns:85px minmax(0,1fr);align-items:start;gap:12px}
 .integration-rules .badge {justify-self:start;font-size:12px;white-space:nowrap}
 .integration-rules p {margin:0;font-size:12px;color:var(--muted);line-height:1.8}
+.adaptation-panel {padding:16px 20px;margin-top:16px}
+.adaptation-panel summary {display:flex;align-items:center;justify-content:space-between;gap:16px;cursor:pointer;min-height:36px}
+.adaptation-panel summary>span:first-child {display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.adaptation-panel summary strong {font-size:14px;font-weight:500}
+.adaptation-panel summary>span:last-child {font-size:12px;white-space:nowrap;color:var(--muted)}
+.adaptation-panel>p {margin:12px 0}
+.adaptation-entry {padding:12px 0;border-top:1px solid var(--soft-line);overflow-wrap:anywhere}
+.adaptation-meta {display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.adaptation-meta time,.adaptation-entry small {font-size:12px;color:var(--muted)}
+.adaptation-entry>strong {font-size:13px;font-weight:500}
+.adaptation-entry p {font-size:13px;line-height:1.8;margin:5px 0}
+#chat-scope {width:100%;margin-top:8px}
+@media(max-width:640px) {.adaptation-panel{padding:14px}.adaptation-panel summary>span:first-child{gap:5px}.adaptation-panel .section-code{width:100%}}
 
 /* Persona journal: a quiet reading page alongside the schedule workbench. */
 .journal-layout {display:grid;grid-template-columns:270px minmax(0,1fr);gap:24px;align-items:start}

@@ -290,7 +290,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.ctx = FakeContext()
         with patch('astrbot_plugin_persona_schedule.main.StarTools.get_data_dir',return_value=self.temp.name):
-            self.plugin = PersonaSchedule(self.ctx, FakeConfig())
+            self.plugin = PersonaSchedule(self.ctx, FakeConfig({"all_chats_enabled": True, "adaptive_enabled": False, "transition_notice_enabled": False}))
         self.plugin.store.settings["enabled"] = True
         self.persona = await self.plugin._persona("traveler")
         self.day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()

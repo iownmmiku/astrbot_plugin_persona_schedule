@@ -115,6 +115,15 @@ async def main():
                 value["mood"] = "平静"
             entries[date] = {**value,"date":date,"timezone":p["timezone"],"persona_key":persona["key"],"created_at":timestamp,"updated_at":timestamp,"revision":1,"source":{"profile":{key:value for key,value in p.items() if key!="weekly"},"schedule":copy.deepcopy(plans[date])}}
     plugin.store.data["personas"].pop("未央", None)
+    # UI-only examples: no model judgment or real conversation takes place.
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).timestamp()
+    plugin.store.data["adaptation_log"] = [
+        {"at":now-300,"umo":UMO,"persona_id":pid,
+         "date":datetime.now(ZoneInfo(plugin.store.data["personas"][pid]["profile"]["timezone"])).date().isoformat(),
+         "activity":"散步、自己的时间","action":"delay","minutes":15,
+         "reason":"演示数据：朋友有重要的话想聊，散步稍晚开始。", "until":now+600}
+        for pid in diary_templates
+    ]
     plugin.store.save()
     bridge = '''<script>window.AstrBotPluginView={ready:async()=>({isDark:false}),apiGet:async(path,query)=>{const r=await fetch('/qa-api/'+path+'?'+new URLSearchParams(query||{}));const d=await r.json();if(!r.ok)throw Error(d.message);return d},apiPost:async(path,body)=>{const r=await fetch('/qa-api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.message);return d}};</script>'''
     async def index(request):
@@ -132,6 +141,8 @@ async def main():
         try:
             payload=await request.json() if request.method=='POST' else dict(request.query)
             value=await handlers[request.match_info['name']](payload)
+            if request.match_info['name'] == 'state':
+                value.setdefault('adaptation_log', plugin.store.data['adaptation_log'])
             return web.json_response(value)
         except Exception as exc:
             return web.json_response({'message':str(exc)},status=400)

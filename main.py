@@ -8,6 +8,7 @@ import random
 import time
 import uuid
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from astrbot.api import AstrBotConfig, logger
@@ -18,17 +19,19 @@ from .core import (DEFAULTS, LABELS, Store, active_events, allowed, digest, fiel
                    merge_locked_slots, minute, slow_bounds, slot_at, validate_events,
                    validate_profile, validate_settings, validate_slots, weekly_for_day)
 from .generator import Generator, is_chat_provider
+from .commands import is_command_event
+from .adaptive import adjustment_summary
+from .interaction import InteractionMixin
 
 NAME = "astrbot_plugin_persona_schedule"
-CONTROL = {"日程", "日程重建", "日程会话"}
 
 
 async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.1")
-class PersonaSchedule(Star):
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.2")
+class PersonaSchedule(InteractionMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context, self.config = context, config
@@ -39,6 +42,16 @@ class PersonaSchedule(Star):
         self.persona_locks, self.session_locks = {}, {}
         self.diary_locks, self.diary_tasks = {}, {}
         self.plan_tasks = {}
+        self.interaction_locks = {}
+        self.dialogue = self.store.data.setdefault("dialogue_state", {})
+        self.adjustments = self.store.data.setdefault("contact_adjustments", {})
+        self.store.data.setdefault("adaptation_log", [])
+        for meta in self.dialogue.values():
+            for notice in meta.get("notices", {}).values():
+                if notice.get("status") == "sending":
+                    notice["status"] = "uncertain"
+                elif notice.get("status") == "generating":
+                    notice.update(status="failed", retry_at=time.time() + 60)
         self.tasks = set()
         self.jobs = self.store.data.setdefault("jobs", {})
         for job in self.jobs.values():
@@ -57,6 +70,7 @@ class PersonaSchedule(Star):
         self.worker = None
         self.last_tick, self.worker_error = 0, ""
         self.store.save()
+        self._migrate_queued_commands()
         self._register_web()
 
     async def initialize(self):
@@ -77,6 +91,28 @@ class PersonaSchedule(Star):
 
     def _lock(self, mapping, key):
         return mapping.setdefault(key, asyncio.Lock())
+
+    def _interaction_allowed(self, umo):
+        return allowed(self.store.settings, umo)
+
+    def _migrate_queued_commands(self):
+        if self.store.data.get("commands_migrated"):
+            return
+        removed = 0
+        for umo, queue in list(self.store.data["queues"].items()):
+            try:
+                config = self.context.get_config(umo)
+            except Exception:
+                config = {}
+            messages = queue["messages"]
+            queue["messages"] = [r for r in messages if not is_command_event(SimpleNamespace(message_str=r.get("text", "")), config)]
+            removed += len(messages) - len(queue["messages"])
+            if not queue["messages"]:
+                self.store.data["queues"].pop(umo, None)
+        self.store.data["commands_migrated"] = True
+        if removed:
+            self.store.log(f"升级时移除了 {removed} 条旧版误暂存的命令，其余留言保留")
+        self.store.save()
 
     async def _persona(self, persona_id):
         item = await maybe_await(self.context.persona_manager.get_persona(persona_id))
@@ -203,6 +239,7 @@ class PersonaSchedule(Star):
                     if inactive():
                         return None
                     record["days"][day] = await self.generator.day(persona, profile, record["calendars"][year], day, recent, umo)
+                record["days"][day]["revision"] = original.get("days", {}).get(day, {}).get("revision", 0) + 1
                 # A date-specific lock takes precedence over the weekly lock.
                 base = merge_locked_slots(weekly_for_day(profile, day), record["locked_days"].get(day, []))
                 record["days"][day]["slots"] = merge_locked_slots(record["days"][day]["slots"], base)
@@ -291,6 +328,12 @@ class PersonaSchedule(Star):
             if schedule["date"] != now.date().isoformat():
                 return unavailable
             slot, end = slot_at(schedule, now)
+            effective = self._effective_slot(env, schedule, slot, now)
+            if effective.get("adaptive", {}).get("action") == "defer":
+                slot = effective
+                # The drawing plugin needs the contact state, not a reason that
+                # could paraphrase private details from the user's conversation.
+                slot["adaptive"].pop("reason", None)
             data = {"persona_id": env["persona"]["id"], "persona_key": env["persona"]["key"], "cid": env["cid"],
                     "date": schedule["date"], "timezone": profile["timezone"], "summary": schedule["summary"],
                     "activity": slot, "events": schedule["events"]}
@@ -317,6 +360,12 @@ class PersonaSchedule(Star):
         if not profile or not schedule:
             raise ValueError("这一天没有已保存的日程，不能凭空补写日记")
         profile = {k: v for k, v in profile.items() if k != "weekly"}
+        schedule = copy.deepcopy(schedule)
+        adjustments = [adjustment_summary(r) for r in self.store.data["adaptation_log"]
+                       if r.get("persona_id") == persona["id"] and r.get("date") == day
+                       and r.get("persona_key") == persona["key"]]
+        if adjustments:
+            schedule["contact_adjustments"] = adjustments[-20:]
         return copy.deepcopy({"profile": profile, "schedule": schedule})
 
     def _check_diary_date(self, persona, day):
@@ -406,8 +455,11 @@ class PersonaSchedule(Star):
         self.store.save()
 
     def _control(self, event):
-        word = event.message_str.strip().lstrip("/").split(maxsplit=1)
-        return bool(word and word[0] in CONTROL)
+        try:
+            config = self.context.get_config(event.unified_msg_origin)
+        except Exception:
+            config = {}
+        return is_command_event(event, config)
 
     def _report_failure(self, key, exc):
         # Provider exceptions may contain credentials; expose only the type.
@@ -423,6 +475,9 @@ class PersonaSchedule(Star):
         umo = event.unified_msg_origin
         if not allowed(self.store.settings, umo) or self._control(event):
             return None
+        result = getattr(event, "get_result", None)
+        if getattr(event, "_has_send_oper", False) or callable(result) and result() is not None:
+            return None
         if event.get_extra(NAME + ":queued", False):
             event.stop_event()
             return None
@@ -437,7 +492,17 @@ class PersonaSchedule(Star):
             if not allowed(self.store.settings, umo):
                 return None
             now = datetime.now(ZoneInfo(profile["timezone"]))
+            await self._adaptive_interaction(event, env, profile, schedule, now)
+            record = self.store.data["personas"].get(env["persona"]["id"], {})
+            if record.get("key") != env["persona"]["key"] or not allowed(self.store.settings, umo):
+                return None
+            profile = record.get("profile") or profile
+            now = datetime.now(ZoneInfo(profile["timezone"]))
+            schedule = record.get("days", {}).get(now.date().isoformat())
+            if schedule is None:
+                return None
             slot, end = slot_at(schedule, now)
+            slot = self._effective_slot(env, schedule, slot, now)
             queue = self.store.data["queues"].get(umo)
             if slot["status"] == "free" and queue is None:
                 return schedule, slot
@@ -447,8 +512,7 @@ class PersonaSchedule(Star):
                 due = time.time() + random.uniform(*slow_bounds(slot, self.store.settings))
             else:
                 due = time.time() + 2
-            # This listener also runs before commands/plugins; no LLM call or
-            # typing/send operation occurs after stop_event for queued messages.
+            # Commands run first. Ordinary busy messages stop before chat LLMs.
             message = event.message_str.strip() or "[非文本消息，附件内容未解析]"
             self.store.enqueue(umo, env["cid"], env["persona"]["key"], event.get_sender_name(),
                                message, time.time(), due, slot["status"], slot["title"])
@@ -460,21 +524,23 @@ class PersonaSchedule(Star):
             # A missing model/bad profile must not accidentally silence a bot.
             return None
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-100)
     async def intercept_message(self, event: AstrMessageEvent):
         if not (event.is_private_chat() or event.is_at_or_wake_command):
             return
         await self._intercept(event)
 
-    @filter.on_llm_request(priority=10000)
+    @filter.on_llm_request(priority=-100)
     async def inject_schedule(self, event: AstrMessageEvent, req):
         # Recheck at the actual LLM boundary, including plugins which wake later.
         info = await self._intercept(event, getattr(req, "conversation", None))
         if info:
             schedule, slot = info
-            req.system_prompt = (req.system_prompt or "") + "\n[角色此刻的生活状态]\n" + json.dumps(
-                {"date": schedule["date"], "summary": schedule["summary"], "activity": slot,
-                 "events": schedule["events"]}, ensure_ascii=False) + "\n保持人设，当前安排可自然影响聊天内容，不必每条消息都报告日程。"
+            env = await self.environment(event.unified_msg_origin, event.get_platform_name(), getattr(req, "conversation", None))
+            if env:
+                profile = self.store.data["personas"][env["persona"]["id"]]["profile"]
+                req.system_prompt = (req.system_prompt or "") + self._life_context(
+                    env, schedule, slot, datetime.now(ZoneInfo(profile["timezone"])))
 
     async def _run(self):
         while not self.closing:
@@ -524,13 +590,23 @@ class PersonaSchedule(Star):
                     queue.update(delivery="paused", reason="对话或人设已切换，请清除旧队列")
                     self.store.save()
                     return
-                if not queue or queue["delivery"] in {"uncertain", "paused", "sending"}:
+                if not queue:
+                    record = self.store.data["personas"].get(env["persona"]["id"], {})
+                    profile = record.get("profile")
+                    if profile and record.get("key") == env["persona"]["key"]:
+                        day = datetime.now(ZoneInfo(profile["timezone"])).date().isoformat()
+                        schedule = record.get("days", {}).get(day)
+                        if schedule:
+                            await self._maybe_transition_notice(env, profile, schedule)
+                    return
+                if queue["delivery"] in {"uncertain", "paused", "sending"}:
                     return
                 profile, _, schedule = await self.ensure(env["persona"], umo)
                 if queue.get("retry_after", 0) > time.time():
                     return
                 now = datetime.now(ZoneInfo(profile["timezone"]))
                 slot, end = slot_at(schedule, now)
+                slot = self._effective_slot(env, schedule, slot, now)
                 if slot["status"] == "busy":
                     queue["due"] = end
                     self.store.save()
@@ -589,6 +665,7 @@ class PersonaSchedule(Star):
             self._send_health(umo, "deferred")
             return
         current_slot, end = slot_at(current_schedule, now)
+        current_slot = self._effective_slot(current, current_schedule, current_slot, now)
         if current_slot["status"] == "busy":
             queue["due"] = end
             self._send_health(umo, "deferred")
@@ -844,6 +921,8 @@ class PersonaSchedule(Star):
                    "send_status": self.health.get(u, {}).get("status", "unverified"),
                    "delivery": q["delivery"], "reason": q["reason"]} for u, q in self.store.data["queues"].items()]
         return {"settings": settings, "personas": options, "sessions": list(sessions.values()),
+                "adaptation_log": [{k: v for k, v in row.items() if k not in {"persona_key", "source_slot"}}
+                                   for row in self.store.data["adaptation_log"][-60:]],
                 "providers": await self._providers(), "queues": queues, "logs": self.store.data["logs"][-30:],
                 "expired_messages": self.store.data.get("expired_messages", 0), "jobs": list(self.jobs.values()),
                 "runtime": {"worker": self._worker_status(), "checked_at": time.time(),
@@ -864,6 +943,8 @@ class PersonaSchedule(Star):
             self.config.update(previous)
             raise
         self.store.data["settings"] = settings
+        if not settings["adaptive_enabled"]:
+            self.adjustments.clear()
         self.store.save()
         self.failures.clear()
         self.store.log("已保存插件设置")

@@ -20,7 +20,7 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.ctx = FakeContext()
         with patch('astrbot_plugin_persona_schedule.main.StarTools.get_data_dir', return_value=self.temp.name):
-            self.plugin = PersonaSchedule(self.ctx, FakeConfig())
+            self.plugin = PersonaSchedule(self.ctx, FakeConfig({"all_chats_enabled": True, "adaptive_enabled": False, "transition_notice_enabled": False}))
         # Daily planning has separate regressions. Keep these tests specific
         # to diary scheduling and provider invocation counts.
         self.plugin.store.settings['auto_schedule_enabled'] = False

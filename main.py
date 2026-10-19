@@ -30,7 +30,7 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.2")
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.3")
 class PersonaSchedule(InteractionMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -532,6 +532,12 @@ class PersonaSchedule(InteractionMixin, Star):
 
     @filter.on_llm_request(priority=-100)
     async def inject_schedule(self, event: AstrMessageEvent, req):
+        # Only replace our own transient block if the same request is checked
+        # again. Preserve the user's text, history and other plugins' parts.
+        previous = getattr(req, "_persona_schedule_content_part", None)
+        if previous is not None:
+            req.extra_user_content_parts = [part for part in req.extra_user_content_parts if part is not previous]
+            req._persona_schedule_content_part = None
         # Recheck at the actual LLM boundary, including plugins which wake later.
         info = await self._intercept(event, getattr(req, "conversation", None))
         if info:
@@ -539,8 +545,13 @@ class PersonaSchedule(InteractionMixin, Star):
             env = await self.environment(event.unified_msg_origin, event.get_platform_name(), getattr(req, "conversation", None))
             if env:
                 profile = self.store.data["personas"][env["persona"]["id"]]["profile"]
-                req.system_prompt = (req.system_prompt or "") + self._life_context(
-                    env, schedule, slot, datetime.now(ZoneInfo(profile["timezone"])))
+                from astrbot.core.agent.message import TextPart
+                part = TextPart(text=self._life_context(
+                    env, schedule, slot, datetime.now(ZoneInfo(profile["timezone"])))).mark_as_temp()
+                if getattr(req, "extra_user_content_parts", None) is None:
+                    req.extra_user_content_parts = []
+                req.extra_user_content_parts.append(part)
+                req._persona_schedule_content_part = part
 
     async def _run(self):
         while not self.closing:

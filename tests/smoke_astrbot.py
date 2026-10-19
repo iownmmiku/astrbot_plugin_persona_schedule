@@ -432,8 +432,19 @@ async def run_smoke(isolation: Path):
                 conversation=await conversations.get_conversation(umo, cid))
             await plugin.inject_schedule(continuing, request)
             assert not continuing.is_stopped() and umo not in plugin.store.data["queues"]
-            assert request.system_prompt.startswith("原有角色提示。") and "倦意" in request.system_prompt
-            assert "有限的联系调整" in request.system_prompt
+            assert request.system_prompt == "原有角色提示。"
+            part = request.extra_user_content_parts[-1]
+            assert "倦意" in part.text and "有限的联系调整" in part.text
+            assert part.model_dump_for_context()["_no_save"] is True
+            assembled = await request.assemble_context()
+            assert assembled["role"] == "user" and assembled["content"][-1]["_no_save"] is True
+            from astrbot.core.agent.message import UserMessageSegment
+            transient = UserMessageSegment.model_validate(assembled)
+            assert "角色此刻" in str(transient.model_dump())
+            from astrbot.core.agent.message import dump_messages_with_checkpoints
+            persisted = dump_messages_with_checkpoints([transient])
+            assert "角色此刻" not in str(persisted)
+            assert continuing.message_str in str(persisted)
             assert plugin.adjustments[umo]["until"] == adjustment["until"]
             assert plan["slots"] == slots and plan["slots"][-1]["status"] == "busy"
             assert before_adaptive == (len(schedule_provider.calls)-1, len(reply_provider.calls),

@@ -167,8 +167,8 @@ class InteractionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.clock("22:01")
         event, request = await self.message("然后发生什么了？", inject=True)
         self.assertFalse(event.stopped)
-        self.assertIn("倦意", request.system_prompt)
-        self.assertIn('"tone": "tired"', request.system_prompt)
+        self.assertIn("倦意", request.extra_user_content_parts[-1].text)
+        self.assertIn('"tone": "tired"', request.extra_user_content_parts[-1].text)
         self.assertEqual(self.plugin.adjustments[UMO]["until"], until)
         self.assertEqual(self.plan, before)
         self.assertEqual(self.plugin.generator.adaptive.await_count, 1)
@@ -243,7 +243,7 @@ class InteractionFlowTests(unittest.IsolatedAsyncioTestCase):
         adjustment = self.plugin.adjustments[UMO]
         self.assertEqual(adjustment["action"], "brief_exception")
         self.assertLessEqual(adjustment["until"] - Frozen.current.timestamp(), 300)
-        self.assertIn("有限的联系调整", request.system_prompt)
+        self.assertIn("有限的联系调整", request.extra_user_content_parts[-1].text)
         self.clock("22:05")
         expired, _ = await self.message()
         self.assertTrue(expired.stopped)
@@ -431,7 +431,7 @@ class InteractionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_notice_already_included_in_response_is_not_sent_separately(self):
         await self.activate()
         _, request = await self.message(inject=True)
-        self.assertIn("upcoming_activity", request.system_prompt)
+        self.assertIn("upcoming_activity", request.extra_user_content_parts[-1].text)
         await self.session_tick()
         self.assertFalse(self.ctx.sent)
         self.plugin.generator.transition_notice.assert_not_awaited()

@@ -55,6 +55,17 @@ sys.modules["astrbot.api.star"].Star = FakeStar
 sys.modules["astrbot.api.star"].StarTools = types.SimpleNamespace(get_data_dir=lambda name: "unused")
 sys.modules["astrbot.api.star"].register = decorator
 
+# Offline SDK double; real TextPart persistence is checked in smoke_astrbot.py.
+class FakeTextPart:
+    def __init__(self, text):
+        self.text, self._no_save = text, False
+    def mark_as_temp(self):
+        self._no_save = True
+        return self
+
+sys.modules["astrbot.core.agent.message"] = types.ModuleType("astrbot.core.agent.message")
+sys.modules["astrbot.core.agent.message"].TextPart = FakeTextPart
+
 from astrbot_plugin_persona_schedule.core import (DEFAULTS, Store, active_events, allowed, digest,
     slot_at, validate_events, validate_profile, validate_settings, validate_slots)
 from astrbot_plugin_persona_schedule.generator import Generator, parse_object, public_calendar
@@ -314,8 +325,43 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.intercept_message(event)
         await self.plugin.inject_schedule(event,req)
         self.assertFalse(event.stopped)
-        self.assertIn("角色此刻",req.system_prompt)
+        self.assertEqual(req.system_prompt, "原人设")
+        self.assertIn("角色此刻", req.extra_user_content_parts[-1].text)
+        self.assertTrue(req.extra_user_content_parts[-1]._no_save)
         self.assertEqual(self.ctx.sent,[])
+
+    async def test_transient_context_preserves_other_parts_and_replaces_stale_block(self):
+        event = FakeEvent()
+        other = FakeTextPart("另一个插件的资料")
+        history = [{"role": "user", "content": "原聊天"}]
+        req = types.SimpleNamespace(system_prompt="固定人设", prompt="用户原话",
+            contexts=history, conversation=None, extra_user_content_parts=[other])
+        await self.plugin.inject_schedule(event, req)
+        first = req.extra_user_content_parts[-1]
+        self.plan("free")[1]["slots"][0]["title"] = "新的活动"
+        await self.plugin.inject_schedule(event, req)
+        self.assertEqual(req.system_prompt, "固定人设")
+        self.assertEqual(req.prompt, "用户原话")
+        self.assertIs(req.contexts, history)
+        self.assertEqual(history, [{"role": "user", "content": "原聊天"}])
+        self.assertEqual(len(req.extra_user_content_parts), 2)
+        self.assertIs(req.extra_user_content_parts[0], other)
+        self.assertIsNot(req.extra_user_content_parts[1], first)
+        self.assertIn("新的活动", req.extra_user_content_parts[1].text)
+        self.assertTrue(req.extra_user_content_parts[1]._no_save)
+        self.plugin.store.settings["enabled"] = False
+        await self.plugin.inject_schedule(event, req)
+        self.assertEqual(req.extra_user_content_parts, [other])
+        self.assertEqual(req.system_prompt, "固定人设")
+
+    async def test_busy_request_does_not_receive_transient_context(self):
+        self.plan("busy")
+        event = FakeEvent()
+        req = types.SimpleNamespace(system_prompt="固定人设", conversation=None, extra_user_content_parts=[])
+        await self.plugin.inject_schedule(event, req)
+        self.assertTrue(event.stopped)
+        self.assertEqual(req.extra_user_content_parts, [])
+        self.assertEqual(req.system_prompt, "固定人设")
 
     async def test_busy_then_free_sends_single_combined_reply(self):
         self.plan("busy")

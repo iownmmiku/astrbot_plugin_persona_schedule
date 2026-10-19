@@ -84,3 +84,8 @@ python -m unittest discover -s tests -p "test_*.py"
 同日运行 `python -m unittest discover -s tests -p 'test_*.py' -v`，共 83 项通过：原有回归 37 项、核心扩展 25 项、运行时扩展 21 项。
 
 该次 SDK 检查使用本地离线模型提供商和记录型平台，没有调用外部模型，没有连接 QQ、Telegram 等实际聊天平台，也没有验证真实用户收件。除非发布说明明确写出平台名称、版本和测试结果，不应将接口替身或离线 SDK 集成描述为外部平台实机联调通过。
+
+
+## 0.3.3 临时用户内容回归（2026-10-19）
+
+220 项离线行为回归及官方 AstrBot 4.28.1 的 12 组隔离 SDK 检查通过。SDK 检查使用真实 `ProviderRequest.assemble_context()`，验证 `TextPart.mark_as_temp()` 的 `_no_save` 标记进入用户内容块；再通过 `UserMessageSegment` 与 `dump_messages_with_checkpoints()` 验证持久化结果保留用户原话并移除日程资料。系统提示词保持原样。未调用外部模型或发送至真实平台，未量化提示缓存命中率。

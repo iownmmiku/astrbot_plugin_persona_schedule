@@ -111,6 +111,12 @@
     "default": 180,
     "hint": "7～1095 篇；超出后保留日期最新的篇目，下一次归档时执行。"
   },
+  "diary_chat_enabled": {
+    "description": "日记参考白名单对话",
+    "type": "bool",
+    "default": true,
+    "hint": "需要启用插件和日记；只记录明确列入会话白名单的文本，从启用后开始，不回读旧聊天。空名单仅按日程写日记。素材保留 8 天并限制条数，关闭或移出名单后清理未归档素材，已有日记保留。"
+  },
   "auto_schedule_enabled": {
     "description": "主动生成每日程",
     "type": "bool",

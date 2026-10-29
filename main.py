@@ -22,6 +22,9 @@ from .generator import Generator, is_chat_provider
 from .commands import is_command_event
 from .adaptive import adjustment_summary
 from .interaction import InteractionMixin
+from .recurrence import apply_recurrences, expand_rules, validate_rules
+from .diary_context import add_material, chat_enabled, material_summary, prune_materials, select_materials
+from .workbench import WorkbenchMixin, _record_for_edit
 
 NAME = "astrbot_plugin_persona_schedule"
 
@@ -30,13 +33,14 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.4")
-class PersonaSchedule(InteractionMixin, Star):
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.5")
+class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context, self.config = context, config
         self.store = Store(StarTools.get_data_dir(NAME))
         self.store.data["settings"] = validate_settings({k: v for k, v in config.items() if k in DEFAULTS}, self.store.settings)
+        prune_materials(self.store, time.time())
         self.store.save()
         self.generator = Generator(context, self.store)
         self.persona_locks, self.session_locks = {}, {}
@@ -235,6 +239,19 @@ class PersonaSchedule(InteractionMixin, Star):
                               or any(row.get("origin") == "manual" for row in calendar.get("events", [])))
                     if old not in protected_years and not manual:
                         del record["calendars"][old]
+            recurring_calendar = apply_recurrences(record["calendars"][year], record.get("recurrences", []), int(year))
+            if recurring_calendar != record["calendars"][year]:
+                recurring_calendar["revision"] = record["calendars"][year].get("revision", 0) + 1
+                record["calendars"][year] = recurring_calendar
+                cached = record["days"].get(day)
+                if cached:
+                    current_events = active_events(recurring_calendar["events"], day)
+                    if cached.get("events", []) != current_events:
+                        if cached.get("origin") == "manual":
+                            cached.update(events=current_events, revision=cached.get("revision", 0) + 1)
+                        else:
+                            record["days"].pop(day)
+                changed = True
             if force == "day":
                 self._preserve_locks(record, {day: record["days"][day]} if day in record["days"] else {})
                 record["days"].pop(day, None)
@@ -382,7 +399,9 @@ class PersonaSchedule(InteractionMixin, Star):
                        and r.get("persona_key") == persona["key"]]
         if adjustments:
             schedule["contact_adjustments"] = adjustments[-20:]
-        return copy.deepcopy({"profile": profile, "schedule": schedule})
+        tz = schedule.get("timezone") or profile["timezone"]
+        return copy.deepcopy({"profile": profile, "schedule": schedule,
+                              "chat_context": select_materials(self.store, persona, day, tz)})
 
     def _check_diary_date(self, persona, day):
         self._year(day)
@@ -405,13 +424,14 @@ class PersonaSchedule(InteractionMixin, Star):
             async with self._lock(self.persona_locks, persona["id"]):
                 source, tz = self._check_diary_date(persona, day)
             if progress:
-                progress("diary", 40, "回顾已结束的日程，按角色语气写日记")
+                progress("diary", 40, "回顾已结束的日程与白名单对话，按角色语气写日记")
             recent = [{"date": d, "title": e["title"], "content": e["content"][:1200]}
                       for d, e in sorted(entries.items()) if d < day and e.get("persona_key") == persona["key"]][-2:]
             async with self.generation_slots:
                 if automatic and not (self.store.settings["enabled"] and self.store.settings["diary_enabled"]):
                     return None
-                value = await self.generator.diary(persona, source["profile"], source["schedule"], recent, umo)
+                diary_day = {**source["schedule"], "conversation_material": source["chat_context"]}
+                value = await self.generator.diary(persona, source["profile"], diary_day, recent, umo)
             async with self._lock(self.persona_locks, persona["id"]):
                 if automatic and not (self.store.settings["enabled"] and self.store.settings["diary_enabled"]):
                     return None
@@ -421,9 +441,13 @@ class PersonaSchedule(InteractionMixin, Star):
                 if progress:
                     progress("saving", 95, "归档日记与当天日程快照")
                 now = time.time()
+                archived_source = copy.deepcopy(source)
+                # Raw conversations have a short, bounded retention. The archive
+                # records counts and schedule evidence, never the sampled text.
+                archived_source["chat_context"] = material_summary(source["chat_context"])
                 entry = {**value, "date": day, "timezone": tz, "persona_key": persona["key"],
                          "created_at": previous["created_at"] if previous else now, "updated_at": now,
-                         "revision": previous.get("revision", 0) + 1 if previous else 1, "source": source}
+                         "revision": previous.get("revision", 0) + 1 if previous else 1, "source": archived_source}
                 entries[day] = entry
                 for old in sorted(entries)[:-self.store.settings["diary_limit"]]:
                     del entries[old]
@@ -464,7 +488,7 @@ class PersonaSchedule(InteractionMixin, Star):
         previous = sessions.get(env["umo"], {})
         sessions[env["umo"]] = {"umo": env["umo"], "cid": env["cid"], "persona_id": env["persona"]["id"],
             "platform": env["platform"], "title": title or previous.get("title", env["umo"]), "last_seen": time.time()}
-        # Metadata only; message text is kept exclusively in bounded queues.
+        # Message materials for diaries are stored separately with short bounds.
         if len(sessions) > 2000:
             oldest = min(sessions, key=lambda u: sessions[u]["last_seen"])
             sessions.pop(oldest)
@@ -551,8 +575,53 @@ class PersonaSchedule(InteractionMixin, Star):
             return
         await self._intercept(event)
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-90)
+    async def capture_diary_input(self, event: AstrMessageEvent):
+        """Record only text addressed to the bot in an explicit diary whitelist."""
+        if (not chat_enabled(self.store.settings, event.unified_msg_origin)
+                or event.get_extra(NAME + ":diary_capture", None) or self._control(event)
+                or not (event.is_private_chat() or event.is_at_or_wake_command)):
+            return
+        value = getattr(event, "message_str", "")
+        if not isinstance(value, str) or not value.strip():
+            return
+        received_at = time.time()
+        try:
+            env = await self.environment(event.unified_msg_origin, event.get_platform_name())
+            if not env:
+                return
+            message_id = field(getattr(event, "message_obj", None), "message_id", "")
+            token = str(message_id) if message_id else uuid.uuid4().hex
+            identity = {"umo": env["umo"], "cid": env["cid"], "persona": {k: env["persona"][k] for k in ("id", "key")}}
+            if add_material(self.store, identity, "user", value, received_at, token):
+                event.set_extra(NAME + ":diary_capture", {"env": identity, "token": token})
+        except Exception as exc:
+            logger.warning("[角色日程] 日记文本采集失败（%s），聊天继续", type(exc).__name__)
+
+    @filter.on_llm_response(priority=-100)
+    async def capture_diary_response(self, event: AstrMessageEvent, response):
+        marker = event.get_extra(NAME + ":diary_capture", None)
+        value = field(response, "completion_text", "")
+        if (not marker or not chat_enabled(self.store.settings, event.unified_msg_origin)
+                or field(response, "role", "assistant") != "assistant"
+                or field(response, "tools_call_name", None) or field(response, "tool_calls", None)):
+            return
+        if not isinstance(value, str) or not value.strip():
+            return
+        generated_at = time.time()
+        try:
+            env = await self.environment(event.unified_msg_origin, event.get_platform_name())
+            original = marker["env"]
+            if (not env or (env["umo"], env["cid"], env["persona"]["key"], env["persona"]["id"])
+                    != (original["umo"], original["cid"], original["persona"]["key"], original["persona"]["id"])):
+                return
+            add_material(self.store, original, "assistant", value, generated_at, marker["token"] + ":" + digest(value))
+        except Exception as exc:
+            logger.warning("[角色日程] 日记回复采集失败（%s），聊天继续", type(exc).__name__)
+
     @filter.on_llm_request(priority=-100)
     async def inject_schedule(self, event: AstrMessageEvent, req):
+        await self.capture_diary_input(event)
         # Only replace our own transient block if the same request is checked
         # again. Preserve the user's text, history and other plugins' parts.
         previous = getattr(req, "_persona_schedule_content_part", None)
@@ -628,6 +697,8 @@ class PersonaSchedule(InteractionMixin, Star):
         # Work per session concurrently so one slow model does not stall everyone.
         now = time.time()
         self.last_tick = now
+        if prune_materials(self.store, now):
+            self.store.save()
         if self.store.prune_expired(now):
             self.store.log("已逐条清理超过保留期限的留言，保留期限内的新留言")
         if not self.store.settings["enabled"]:
@@ -764,6 +835,10 @@ class PersonaSchedule(InteractionMixin, Star):
             self.store.save()
             return
         self._send_health(umo, "accepted", verified=sent is True, sent_at=time.time())
+        try:
+            add_material(self.store, env, "assistant", reply, time.time(), "aggregate:" + digest(sorted(ids)))
+        except Exception as exc:
+            logger.warning("[角色日程] 补回日记采集失败（%s），继续完成已发送批次", type(exc).__name__)
         self.store.finish_batch(umo, ids)
         # A history write failure must never trigger another platform send.
         try:
@@ -839,7 +914,10 @@ class PersonaSchedule(InteractionMixin, Star):
                   "detail": ("GET", self.web_detail), "generate": ("POST", self.web_generate),
                   "job": ("GET", self.web_job), "save": ("POST", self.web_save),
                   "queue": ("POST", self.web_queue), "providers": ("GET", self.web_providers),
-                  "diagnostics": ("GET", self.web_diagnostics), "diary": ("GET", self.web_diary)}
+                  "diagnostics": ("GET", self.web_diagnostics), "diary": ("GET", self.web_diary),
+                  "preview": ("POST", self.web_preview), "history": ("GET", self.web_history),
+                  "restore": ("POST", self.web_restore), "recurrences": ("GET", self.web_recurrences),
+                  "recurrences-save": ("POST", self.web_save_recurrences)}
         for path, (method, handler) in routes.items():
             self.context.register_web_api(f"/{NAME}/{path}", self._web_handler(handler, method), [method], "角色日程 · " + path)
         self.web_available = True
@@ -1015,6 +1093,7 @@ class PersonaSchedule(InteractionMixin, Star):
             self.config.update(previous)
             raise
         self.store.data["settings"] = settings
+        prune_materials(self.store, time.time())
         if not settings["adaptive_enabled"]:
             self.adjustments.clear()
         self.store.save()
@@ -1052,6 +1131,8 @@ class PersonaSchedule(InteractionMixin, Star):
                 reason = str(exc)
         return {"persona_id": persona["id"], "date": day, "today": today, "timezone": tz,
                 "automatic": self.store.settings["enabled"] and self.store.settings["diary_enabled"],
+                "chat_material": material_summary(select_materials(self.store, persona, day, tz)),
+                "chat_whitelist_count": len(self.store.settings["whitelist"]),
                 "can_generate": can_generate, "reason": reason, "entry": entry,
                 "entries": [{"date": d, "title": e["title"], "mood": e.get("mood", ""),
                              "updated_at": e["updated_at"]} for d, e in sorted(entries.items(), reverse=True)]}
@@ -1125,7 +1206,8 @@ class PersonaSchedule(InteractionMixin, Star):
         persona = await self._persona(str(payload.get("persona_id", "")))
         kind = payload.get("kind")
         async with self._lock(self.persona_locks, persona["id"]):
-            record = self._record(persona)
+            record = _record_for_edit(self.store.data["personas"], persona)
+            original = copy.deepcopy(record)
             if kind == "profile":
                 profile = validate_profile(payload.get("value"))
                 self._preserve_locks(record, record["days"])
@@ -1135,14 +1217,19 @@ class PersonaSchedule(InteractionMixin, Star):
                 year = self._year(str(payload.get("date", "")))
                 existing = record["calendars"].get(str(year), {})
                 # Preserve untouched provenance; edited rows become manual.
-                rows = validate_events(payload.get("value"), year, manual=True)
+                value = payload.get("value")
+                if not isinstance(value, list):
+                    raise ValueError("活动应为数组")
+                rows = validate_events([row for row in value if not isinstance(row, dict)
+                    or not (str(row.get("id", "")).startswith("recurrence:") or row.get("origin") == "recurring")], year, manual=True)
                 for row in rows:
                     old = next((r for r in existing.get("events", []) if r["id"] == row["id"]), None)
                     if old and all(row.get(k) == old.get(k) for k in row if k != "origin"):
                         row["origin"] = old["origin"]
                 self._preserve_locks(record, {k: v for k, v in record["days"].items() if k.startswith(str(year))})
-                record["calendars"][str(year)] = {**existing, "year": year, "events": rows,
-                    "revision": existing.get("revision", 0) + 1, "origin": "manual"}
+                from .recurrence import apply_recurrences
+                record["calendars"][str(year)] = apply_recurrences({**existing, "year": year, "events": rows,
+                    "revision": existing.get("revision", 0) + 1, "origin": "manual"}, record.get("recurrences", []), year)
                 record["days"] = {k: v for k, v in record["days"].items() if not k.startswith(str(year))}
             elif kind == "day":
                 day = str(payload.get("date", ""))
@@ -1160,9 +1247,65 @@ class PersonaSchedule(InteractionMixin, Star):
                 self._preserve_locks(record, {day: record["days"][day]})
             else:
                 raise ValueError("保存类型无效")
-            self.store.save()
+            snapshot_id = self._commit_edit(persona, original, record, kind, str(payload.get("date", "")))
         self.failures.clear()
-        return {"saved": True}
+        return {"saved": True, "snapshot_id": snapshot_id}
+
+    async def web_recurrences(self, payload):
+        persona = await self._persona(str(payload.get("persona_id", "")))
+        record = self.store.data["personas"].get(persona["id"], {})
+        if record.get("key") != persona["key"]:
+            record = {}
+        if payload.get("date"):
+            year = self._year(str(payload["date"]))
+        elif payload.get("year") is not None:
+            try:
+                year = int(payload["year"])
+            except (TypeError, ValueError):
+                raise ValueError("年份无效") from None
+            self._year(f"{year:04d}-01-01")
+        else:
+            tz = (record.get("profile") or {}).get("timezone", self.store.settings["timezone"])
+            year = datetime.now(ZoneInfo(tz)).year
+        rules = copy.deepcopy(record.get("recurrences", []))
+        return {"persona_id": persona["id"], "rules": rules, "year": year,
+                "events": expand_rules(rules, year), "calendar_systems": ["gregorian", "fictional"]}
+
+    async def web_save_recurrences(self, payload):
+        persona = await self._persona(str(payload.get("persona_id", "")))
+        rules = validate_rules(payload.get("rules"))
+        async with self._lock(self.persona_locks, persona["id"]):
+            previous = _record_for_edit(self.store.data["personas"], persona)
+            if previous.get("recurrences", []) == rules:
+                return {"saved": True, "count": len(rules)}
+            record = copy.deepcopy(previous)
+            old_rules = record.get("recurrences", [])
+            record["recurrences"] = rules
+            for year, calendar in list(record["calendars"].items()):
+                updated = apply_recurrences(calendar, rules, int(year))
+                if updated != calendar:
+                    updated["revision"] = calendar.get("revision", 0) + 1
+                    record["calendars"][year] = updated
+            before_years, after_years = {}, {}
+            for day, schedule in list(record["days"].items()):
+                year = self._year(day)
+                if year not in before_years:
+                    before_years[year], after_years[year] = expand_rules(old_rules, year), expand_rules(rules, year)
+                before = active_events(before_years[year], day)
+                after = active_events(after_years[year], day)
+                if before == after:
+                    continue
+                if schedule.get("origin") == "manual":
+                    calendar = record["calendars"].get(str(year), {"events": schedule.get("events", [])})
+                    events = active_events(apply_recurrences(calendar, rules, year)["events"], day)
+                    schedule.update(events=events, revision=schedule.get("revision", 0) + 1)
+                else:
+                    record["days"].pop(day)
+            # An invalidated generated day may later restart its revision at
+            # one. Never allow an old exception to survive a changed rule set.
+            snapshot_id = self._commit_edit(persona, previous, record, "recurrences", clear_adjustments=True)
+        self.failures.clear()
+        return {"saved": True, "count": len(rules), "snapshot_id": snapshot_id}
 
     async def web_queue(self, payload):
         umo, action = str(payload.get("umo", "")), payload.get("action")

@@ -239,6 +239,7 @@ async def run_smoke(isolation: Path):
         assert 'data-theme="dark"' in html.content and 'name="color-scheme" content="dark"' in html.content
         assets = Assets()
         assets.feed(html.content)
+        plugin_version = re.search(r"(?m)^version:\s*(\S+)$", (ROOT / "metadata.yaml").read_text(encoding="utf-8")).group(1)
         prefix = f"/api/plugin/page/content/{NAME}/schedule/"
         assert any(urlsplit(url).path == prefix + "style.css" for url in assets.urls)
         assert any(urlsplit(url).path == prefix + "app.js" for url in assets.urls)
@@ -246,7 +247,10 @@ async def run_smoke(isolation: Path):
         for url in assets.urls:
             parsed = urlsplit(url)
             if parsed.path.startswith(prefix) or parsed.path == "/api/plugin/page/bridge-sdk.js":
-                assert parse_qs(parsed.query) == {"asset_token": [token], "theme": ["dark"]}
+                query = parse_qs(parsed.query)
+                if urlsplit(url).path.endswith(("/style.css", "/app.js")):
+                    assert query.pop("v", None) == [plugin_version]
+                assert query == {"asset_token": [token], "theme": ["dark"]}
                 assert PluginPageAuth.is_scope_valid(claims, parsed.path)
         light = await page_asset("index.html", theme="light")
         assert 'data-theme="light"' in light.content
@@ -498,6 +502,51 @@ async def run_smoke(isolation: Path):
         assert plugin.store.data["diaries"][persona["id"]][yesterday]["revision"] == 2
         assert len(diary_provider.calls) == 2 and len(recording.sent) == before[2]
         checks.append("native diary regeneration job + atomic revisioned archive without platform delivery")
+
+        # New tools exercise real registered endpoints and request objects.
+        before_preview = json.dumps(plugin.store.data, ensure_ascii=False, sort_keys=True)
+        forecast = await request_api("preview", "POST", {"persona_id":persona["id"], "date":day,
+            "time":"12:00", "message":"今晚有空吗？", "umo":umo})
+        assert forecast["read_only"] and not forecast["model_evaluated"]
+        assert before_preview == json.dumps(plugin.store.data, ensure_ascii=False, sort_keys=True)
+        checks.append("real read-only scenario endpoint leaves schedules, queues and dialogue state unchanged")
+
+        current_plan = plugin.store.data["personas"][persona["id"]]["days"][day]
+        old_summary = current_plan["summary"]
+        changed_day = {**copy.deepcopy(current_plan), "summary":"Edited only in isolated SDK"}
+        saved = await request_api("save", "POST", {"persona_id":persona["id"], "date":day, "kind":"day", "value":changed_day})
+        snapshots = await request_api("history", payload={"persona_id":persona["id"]})
+        assert snapshots["entries"][0]["id"] == saved["snapshot_id"]
+        await request_api("restore", "POST", {"persona_id":persona["id"], "id":saved["snapshot_id"]})
+        assert plugin.store.data["personas"][persona["id"]]["days"][day]["summary"] == old_summary
+        assert len((await request_api("history", payload={"persona_id":persona["id"]}))["entries"]) >= 2
+        checks.append("real snapshot save/history/restore endpoints preserve schedule and retain undo of restore")
+
+        rule = {"title":"旅人的跨年纪念", "calendar":"fictional", "mapping":"设定霜月末日映射公历12月31日",
+            "month":12, "day":31, "duration_days":3, "kind":"anniversary"}
+        await request_api("recurrences-save", "POST", {"persona_id":persona["id"], "rules":[rule]})
+        recurring = await request_api("recurrences", payload={"persona_id":persona["id"], "year":"2028"})
+        assert any(e["start"] == "2027-12-31" and e["end"] == "2028-01-02" for e in recurring["events"])
+        checks.append("real recurring-rule endpoints retain fictional mapping and cross-year occurrence dates")
+
+        await request_api("settings", "POST", {"whitelist":[umo], "diary_chat_enabled":True})
+        material_at = datetime.fromisoformat(yesterday+"T20:00:00").replace(tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        from unittest.mock import patch
+        chat_event = event("白名单素材：今天聊到一起看星星。")
+        history_before_materials = (await conversations.get_conversation(umo, await conversations.get_curr_conversation_id(umo))).history
+        with patch("astrbot_plugin_persona_schedule.main.time.time", return_value=material_at):
+            await plugin.capture_diary_input(chat_event)
+            await plugin.capture_diary_response(chat_event, LLMResponse(role="assistant", completion_text="可以留意今晚的夜空。"))
+        await plugin.ensure_diary(persona, yesterday, umo, force=True)
+        material_payload = json.loads(diary_provider.calls[-1]["prompt"])["saved_day"]["conversation_material"]
+        assert material_payload["message_count"] == 2 and material_payload["conversation_count"] == 1
+        assert [row["role"] for row in material_payload["messages"]] == ["user", "assistant"]
+        material_archive = plugin.store.data["diaries"][persona["id"]][yesterday]
+        assert "messages" not in material_archive["source"]["chat_context"]
+        assert history_before_materials == (await conversations.get_conversation(umo, await conversations.get_curr_conversation_id(umo))).history
+        await request_api("settings", "POST", {"whitelist":[]})
+        assert not plugin.store.data["diary_chat"]["messages"] and material_archive["source"]["chat_context"]["message_count"] == 2
+        checks.append("real event and LLMResponse whitelist journal materials, bounded metadata-only archive and revocation cleanup")
 
         await plugin.initialize()
         await asyncio.sleep(0.05)

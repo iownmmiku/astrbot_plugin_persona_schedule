@@ -125,6 +125,18 @@ async def main():
         for pid in diary_templates
     ]
     plugin.store.save()
+    # Whitelist-only diary materials are synthetic, never read from AstrBot.
+    from astrbot_plugin_persona_schedule.diary_context import add_material
+    plugin.store.settings.update(enabled=True, diary_enabled=True, diary_chat_enabled=True, whitelist=[UMO])
+    plugin.store.data['diary_chat'] = {'messages': [], 'dropped': {}}
+    p = await plugin._persona('星野澪')
+    yesterday = (datetime.now(ZoneInfo('Asia/Tokyo')).date() - timedelta(days=1)).isoformat()
+    material_at = datetime.fromisoformat(yesterday+'T20:00:00').replace(tzinfo=ZoneInfo('Asia/Tokyo')).timestamp()
+    material_env = {'umo':UMO,'cid':'qa-diary-conversation','persona':p}
+    plugin.store.settings.update(whitelist_enabled=True, all_chats_enabled=False)
+    plugin.store.data['sessions'][UMO] = {'umo':UMO,'cid':'conv-1','persona_id':'星野澪','platform':'test','title':'演示白名单对话','last_seen':material_at}
+    add_material(plugin.store, material_env, 'user', '演示素材：今天路过便利店，想起你喜欢的饮料。', material_at, 'qa-user')
+    add_material(plugin.store, material_env, 'assistant', '演示回复：下次经过时也留意一下吧。', material_at+1, 'qa-assistant')
     bridge = '''<script>window.AstrBotPluginView={ready:async()=>({isDark:false}),apiGet:async(path,query)=>{const r=await fetch('/qa-api/'+path+'?'+new URLSearchParams(query||{}));const d=await r.json();if(!r.ok)throw Error(d.message);return d},apiPost:async(path,body)=>{const r=await fetch('/qa-api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.message);return d}};</script>'''
     async def index(request):
         html=(ROOT/'pages/schedule/index.html').read_text(encoding='utf-8').replace('<head>','<head>'+bridge)
@@ -136,7 +148,7 @@ async def main():
         name=request.match_info['name']
         if name not in {'app.js','style.css','vendor/rhinelab/content-transition.js'}:raise web.HTTPNotFound()
         return web.FileResponse(ROOT/'pages/schedule'/name)
-    handlers={"state":plugin.web_state,"detail":plugin.web_detail,"settings":plugin.web_settings,"generate":plugin.web_generate,"job":plugin.web_job,"save":plugin.web_save,"queue":plugin.web_queue,"providers":plugin.web_providers,"diagnostics":plugin.web_diagnostics,"diary":plugin.web_diary}
+    handlers={"state":plugin.web_state,"detail":plugin.web_detail,"settings":plugin.web_settings,"generate":plugin.web_generate,"job":plugin.web_job,"save":plugin.web_save,"queue":plugin.web_queue,"providers":plugin.web_providers,"diagnostics":plugin.web_diagnostics,"diary":plugin.web_diary,"preview":plugin.web_preview,"history":plugin.web_history,"restore":plugin.web_restore,"recurrences":plugin.web_recurrences,"recurrences-save":plugin.web_save_recurrences}
     async def api(request):
         try:
             payload=await request.json() if request.method=='POST' else dict(request.query)

@@ -59,14 +59,15 @@ function harness(handler = async (method, resource, data) => {
     renderSettings=()=>{};renderAutoPersonas=()=>{};renderStateStatus=()=>{};
     renderProviders=()=>{};renderDiary=()=>{};
     globalThis.ui={loadDetail,save,openEditor,applyBoundary,pollJob,recoverJob,init,chooseDate,
-      requireDetailReady,controlsLocked,detailMatchesSelection};
+      requireDetailReady,controlsLocked,detailMatchesSelection,runPreview,loadHistory,restoreSnapshot,
+      loadRecurrences,saveRecurrences,openRecurrence,applyRecurrence,renderChatScope};
   `,context);
   const run = code => vm.runInContext(code,context);
   context.seedDetail=detailFor('A');context.seedState=baseState();
   run(`state=seedState;detail=seedDetail;detailSelection={personaId:'A',date:'${date}'};
        $('persona').value='A';$('date').value='${date}';priorPersona='A';priorDate='${date}';`);
   const snapshot = () => JSON.parse(run(`JSON.stringify({detail,detailSelection,detailLoading,dirty,
-    dirtyKinds:[...dirtyKinds],job,generating,followRoleToday,state,
+    dirtyKinds:[...dirtyKinds],job,generating,followRoleToday,state,recurrenceData,recurrenceDraft,recurrenceDirty,historyData,previewData,previewBusy,
     persona:$('persona').value,date:$('date').value,notice:$('notice').textContent})`));
   return {ui:context.ui,run,snapshot,calls,timers,element,context};
 }
@@ -233,4 +234,123 @@ test('a completed job stays completed when refreshing the resulting detail fails
   await h.ui.pollJob();h.ui.recoverJob();
   assert.equal(h.snapshot().job,null);assert.equal(h.snapshot().generating,false);
   assert.equal([...h.timers.values()].some(t=>t.delay===5000),false);
+});
+
+const previewFor = (personaId='A',day=date) => ({persona_id:personaId,date:day,time:'21:00',timezone:'Asia/Tokyo',
+  read_only:true,status:'busy',scope:{allowed:true,reason:'白名单'},would_queue:true,
+  base_activity:{title:'睡觉',start:'21:00',end:'24:00'},effective_activity:{title:'睡觉'},model_evaluated:false});
+const recurringRule = {id:'annual-1',title:'霜月祭',kind:'festival',calendar:'fictional',month:11,day:15,
+  duration_days:1,leap_policy:'skip',mapping:'霜月暂映射为公历11月',enabled:true};
+
+test('a basic preview sends only a read-only request and leaves saved detail and queues untouched', async()=>{
+  const h=harness(async(_,resource)=>{assert.equal(resource,'preview');return previewFor();});
+  h.element('preview-time').value='21:00';h.element('preview-message').value='重要的话';
+  h.element('preview-session').value='adapter:FriendMessage:1';h.element('preview-active').checked=true;
+  const original=h.snapshot();await h.ui.runPreview();
+  assert.equal(h.calls.length,1);assert.equal(h.calls[0].data.evaluate,false);
+  assert.equal(h.calls[0].data.active_conversation,true);assert.equal(h.calls[0].data.message,'重要的话');
+  assert.deepEqual(h.snapshot().detail,original.detail);assert.deepEqual(h.snapshot().state,original.state);
+  assert.match(h.element('preview-result').innerHTML,/静默暂存/);assert.equal(h.snapshot().previewBusy,false);
+});
+
+test('model preview is an explicit choice and is never submitted twice while pending', async()=>{
+  const response=deferred(),h=harness(()=>response.promise);h.element('preview-time').value='21:00';
+  const pending=h.ui.runPreview(true);await h.ui.runPreview(true);
+  assert.equal(h.calls.length,1);assert.equal(h.calls[0].data.evaluate,true);
+  response.resolve({...previewFor(),model_evaluated:true});await pending;
+  assert.match(h.element('preview-result').innerHTML,/已取得日程模型/);
+});
+
+test('a preview response cannot leak into a newly selected persona', async()=>{
+  const response=deferred(),h=harness(async(_,resource,data)=>resource==='preview'?response.promise:detailFor(data.persona_id,data.date));
+  h.element('preview-time').value='21:00';const pending=h.ui.runPreview();
+  h.element('persona').value='B';await h.ui.loadDetail();response.resolve(previewFor());await pending;
+  assert.equal(h.snapshot().previewData,null);assert.equal(h.snapshot().previewBusy,false);
+  assert.doesNotMatch(h.element('preview-result').innerHTML,/静默暂存/);
+});
+
+test('preview explains that excluded conversations do not inherit busy silence', async()=>{
+  const h=harness(async()=>({...previewFor(),scope:{allowed:false},would_queue:false}));
+  h.element('preview-time').value='21:00';await h.ui.runPreview();
+  assert.match(h.element('preview-result').innerHTML,/当前会话不受日程拦截/);
+  assert.doesNotMatch(h.element('preview-result').innerHTML,/静默暂存/);
+});
+
+test('a failed preview clears the old successful result and releases its buttons', async()=>{
+  const h=harness(async()=>{throw new Error('未保存这一天');});
+  h.element('preview-time').value='21:00';h.context.oldPreview=previewFor();h.run('previewData=oldPreview;');
+  await assert.rejects(h.ui.runPreview(),/未保存/);
+  assert.equal(h.snapshot().previewData,null);assert.equal(h.snapshot().previewBusy,false);
+  assert.match(h.element('preview-result').innerHTML,/未保存这一天/);
+});
+
+test('recurrence draft stays with its persona and survives ordinary same-persona detail reload', async()=>{
+  const h=harness();h.context.rule=recurringRule;
+  h.run("recurrenceData={persona_id:'A',rules:[rule]};recurrenceDraft=[rule];recurrenceDirty=true;");
+  await h.ui.loadDetail();assert.equal(h.snapshot().recurrenceDirty,true);
+  h.element('persona').value='B';await h.ui.loadDetail();
+  assert.equal(h.snapshot().recurrenceDirty,false);assert.deepEqual(h.snapshot().recurrenceDraft,[]);
+});
+
+test('loading recurrence rules never overwrites an existing local rule draft', async()=>{
+  const h=harness();h.context.rule=recurringRule;
+  h.run("recurrenceData={persona_id:'A',rules:[]};recurrenceDraft=[rule];recurrenceDirty=true;");
+  await h.ui.loadRecurrences();assert.equal(h.calls.length,0);
+  assert.equal(h.snapshot().recurrenceDraft[0].title,'霜月祭');
+});
+
+test('fictional recurrence requires a mapping and invalid dates never enter the draft', ()=>{
+  const h=harness();h.run("recurrenceData={persona_id:'A',rules:[]};");h.ui.openRecurrence();
+  h.element('rule-title').value='霜月祭';h.element('rule-calendar').value='fictional';h.element('rule-month').value='11';h.element('rule-day').value='15';
+  assert.throws(()=>h.ui.applyRecurrence(),/映射/);assert.equal(h.snapshot().recurrenceDraft.length,0);
+  h.element('rule-mapping').value='映射到公历';h.element('rule-month').value='4';h.element('rule-day').value='31';
+  assert.throws(()=>h.ui.applyRecurrence(),/有效的月份和日期/);
+  h.element('rule-day').value='30';h.ui.applyRecurrence();
+  assert.equal(h.snapshot().recurrenceDraft.length,1);assert.equal(h.snapshot().recurrenceDirty,true);
+  assert.equal(h.calls.length,0);
+});
+
+test('saving recurring rules preserves unrelated unsaved day edits', async()=>{
+  const h=harness(async(_,resource,data)=>{
+    if(resource==='recurrences-save')return {saved:true};
+    if(resource==='recurrences')return {persona_id:'A',rules:[recurringRule]};
+    if(resource==='detail')return detailFor(data.persona_id,data.date);
+  });
+  h.context.rule=recurringRule;h.run("recurrenceData={persona_id:'A',rules:[]};recurrenceDraft=[rule];recurrenceDirty=true;dirty=true;dirtyKinds.add('day');detail.day.summary='手工日程草稿';askConfirm=async()=>true;");
+  await h.ui.saveRecurrences();const s=h.snapshot();
+  assert.equal(s.recurrenceDirty,false);assert.equal(s.dirty,true);assert.equal(s.detail.day.summary,'手工日程草稿');
+  assert.equal(h.calls.filter(c=>c.method==='POST').length,1);assert.equal(h.calls[0].resource,'recurrences-save');
+});
+
+test('a failed recurring save keeps the draft and unlocks the page', async()=>{
+  const h=harness(async()=>{throw new Error('save failed');});h.context.rule=recurringRule;
+  h.run("recurrenceData={persona_id:'A',rules:[]};recurrenceDraft=[rule];recurrenceDirty=true;askConfirm=async()=>true;");
+  await assert.rejects(h.ui.saveRecurrences(),/save failed/);
+  assert.equal(h.snapshot().recurrenceDirty,true);assert.equal(h.ui.controlsLocked(),false);
+});
+
+test('history responses from a previous persona are ignored', async()=>{
+  const response=deferred(),h=harness(()=>response.promise);const pending=h.ui.loadHistory();
+  h.element('persona').value='B';response.resolve({persona_id:'A',entries:[{id:'old',can_restore:true}]});await pending;
+  assert.equal(h.snapshot().historyData,null);
+});
+
+test('restoring a snapshot requires confirmation and keeps all drafts if declined', async()=>{
+  const h=harness();h.run("historyData={persona_id:'A',entries:[{id:'old',can_restore:true}]};dirty=true;recurrenceDirty=true;askConfirm=async()=>false;");
+  await h.ui.restoreSnapshot('old');assert.equal(h.calls.length,0);
+  assert.equal(h.snapshot().dirty,true);assert.equal(h.snapshot().recurrenceDirty,true);
+});
+
+test('snapshot restore failure preserves existing day and recurring drafts', async()=>{
+  const h=harness(async()=>{throw new Error('restore failed');});
+  h.run("historyData={persona_id:'A',entries:[{id:'old',can_restore:true}]};dirty=true;recurrenceDirty=true;askConfirm=async()=>true;");
+  await assert.rejects(h.ui.restoreSnapshot('old'),/restore failed/);
+  assert.equal(h.snapshot().dirty,true);assert.equal(h.snapshot().recurrenceDirty,true);assert.equal(h.ui.controlsLocked(),false);
+});
+
+test('diary whitelist remains explicitly visible when controlling every conversation', ()=>{
+  const h=harness();h.element('chat-scope').value='all';h.element('diary-chat-enabled').checked=true;
+  h.ui.renderChatScope();assert.equal(h.element('whitelist-selection').hidden,false);
+  assert.match(h.element('diary-whitelist-status').textContent,/白名单为空/);
+  h.element('diary-chat-enabled').checked=false;h.ui.renderChatScope();assert.equal(h.element('whitelist-selection').hidden,true);
 });

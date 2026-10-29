@@ -2641,3 +2641,44 @@ input:not([type="checkbox"]),select,textarea {font-size:13px;min-height:40px}
 .journal-note {font-size:12px;color:var(--muted);line-height:1.8;border-top:1px solid var(--soft-line);padding-top:18px;margin-top:24px}
 @media(max-width:900px) {.journal-layout{grid-template-columns:220px minmax(0,1fr);gap:16px}.journal-paper{padding:24px}.journal-index{padding:16px}}
 @media(max-width:640px) {.journal-layout{grid-template-columns:minmax(0,1fr)}.journal-entries{max-height:220px}.journal-index{padding:16px}.journal-entry{min-height:78px}.journal-paper{padding:20px;min-height:450px}.journal-body{font-size:16px;line-height:2.15}.journal-paper-top>span:last-child{font-size:10px;letter-spacing:.2px}.journal-empty{min-height:280px}.journal-empty h3{font-size:22px}#diary .intro-line .button-group{width:100%;flex-wrap:wrap}#diary .intro-line .button-group button{flex:1;min-width:120px}}
+
+/* Rehearsal, editing memory and returning dates share the archive's paper grid. */
+.studio-layout {display:grid;grid-template-columns:minmax(290px,.95fr) minmax(0,1.05fr);gap:24px;align-items:start}
+.studio-form,.studio-result,.history-panel,.recurrence-panel {padding:24px}
+.studio-form h3,.studio-result h3 {font-size:20px;font-weight:500;margin:5px 0 12px}
+.studio-form .form-grid {margin-top:20px}
+.studio-actions {display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+.studio-actions button {flex:1;min-width:130px}
+.studio-result {min-height:440px}
+.studio-result .empty {min-height:270px;justify-content:center}
+.forecast-heading {display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:20px 0}
+.forecast-heading strong {font-size:16px;font-weight:500;font-variant-numeric:tabular-nums}
+.forecast-heading small {color:var(--muted)}
+.studio-result .forecast-behavior {font-size:23px;line-height:1.6;margin-bottom:22px}
+.forecast-facts {margin:0;border-top:1px solid var(--soft-line)}
+.forecast-facts>div {display:grid;grid-template-columns:100px minmax(0,1fr);gap:16px;padding:11px 0;border-bottom:1px solid var(--soft-line)}
+.forecast-facts dt {color:var(--muted);font-size:13px}
+.forecast-facts dd {margin:0;overflow-wrap:anywhere}
+.forecast-facts dd small {display:block;color:var(--muted);font-variant-numeric:tabular-nums}
+.forecast-reason {border-left:2px solid var(--accent);padding-left:14px;line-height:1.9;margin:22px 0}
+.forecast-decision {padding:16px;background:var(--wash);margin-top:20px}
+.forecast-decision p {margin:8px 0 0}
+.history-panel,.recurrence-panel {margin-top:26px}
+.history-list,.recurrence-list {margin-top:18px;border-top:1px solid var(--line)}
+.history-row {display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:16px;align-items:start;padding:20px 0;border-bottom:1px solid var(--soft-line)}
+.history-mark {font-size:26px;line-height:1.4;color:var(--accent)}
+.history-copy h3,.recurrence-copy h3 {font-size:16px;font-weight:500;margin:5px 0 8px;overflow-wrap:anywhere}
+.history-copy ul {padding-left:18px;margin:6px 0;color:var(--muted);font-size:13px;line-height:1.9}
+.history-row>button {align-self:center}
+.recurrence-row {display:grid;grid-template-columns:88px minmax(0,1fr) auto;gap:20px;padding:20px 0;border-bottom:1px solid var(--soft-line)}
+.recurrence-date strong {font-size:25px;font-weight:300;line-height:1.3;font-variant-numeric:tabular-nums}
+.recurrence-date small {display:block;color:var(--muted);font-size:12px;margin-top:5px}
+.recurrence-copy p {margin:5px 0;overflow-wrap:anywhere}
+.recurrence-copy>small {color:var(--muted)}
+.recurrence-row .actions {align-self:start}
+.journal-materials {font-size:12px;line-height:1.8;color:var(--muted);padding:12px 0;border-bottom:1px solid var(--soft-line);margin-bottom:20px}
+#recurrence-editor {width:min(650px,calc(100% - 32px))}
+#recurrence-editor .form-grid {margin-top:18px}
+#preview-loading {min-height:22px}
+@media(max-width:900px) {.studio-layout {grid-template-columns:minmax(0,1fr)}.studio-result{min-height:0}.studio-result .empty{min-height:180px}}
+@media(max-width:640px) {.studio-form,.studio-result,.history-panel,.recurrence-panel{padding:18px}.history-row{grid-template-columns:24px minmax(0,1fr);gap:10px}.history-row>button{grid-column:2;justify-self:start}.recurrence-row{grid-template-columns:68px minmax(0,1fr);gap:12px}.recurrence-row .actions{grid-column:2;justify-self:end}.recurrence-date strong{font-size:22px}.recurrence-panel>.section-heading,.history-panel>.section-heading{align-items:flex-start;gap:14px}.recurrence-panel .button-group{width:100%;flex-wrap:wrap}.recurrence-panel .button-group button{flex:1;min-width:95px}.forecast-facts>div{grid-template-columns:85px minmax(0,1fr);gap:10px}.studio-result .forecast-behavior{font-size:21px}.history-copy .card-meta{flex-wrap:wrap}}

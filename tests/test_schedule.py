@@ -48,7 +48,7 @@ sys.modules["astrbot.api"].logger = logging.getLogger("test")
 sys.modules["astrbot.api.event"].AstrMessageEvent = object
 sys.modules["astrbot.api.event"].MessageChain = FakeChain
 sys.modules["astrbot.api.event"].filter = types.SimpleNamespace(event_message_type=decorator,
-    on_llm_request=decorator, command=decorator, permission_type=decorator,
+    on_llm_request=decorator, on_llm_response=decorator, command=decorator, permission_type=decorator,
     EventMessageType=types.SimpleNamespace(ALL=1), PermissionType=types.SimpleNamespace(ADMIN=1))
 sys.modules["astrbot.api.star"].Context = object
 sys.modules["astrbot.api.star"].Star = FakeStar
@@ -503,7 +503,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_registered_web_routes_use_plugin_prefix(self):
         self.assertEqual({r[0].rsplit('/',1)[-1] for r in self.ctx.routes},
-                         {'state','settings','detail','generate','job','save','queue','providers','diagnostics','diary'})
+                         {'state','settings','detail','generate','job','save','queue','providers','diagnostics','diary',
+                          'preview','history','restore','recurrences','recurrences-save'})
         self.assertTrue(all(r[0].startswith('/'+NAME+'/') for r in self.ctx.routes))
 
     async def test_cached_schedule_is_stable_and_no_extra_model_calls(self):

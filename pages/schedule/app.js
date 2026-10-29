@@ -4,10 +4,10 @@ const $ = (id) => document.getElementById(id);
 const bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels = {free:'空闲', slow:'半忙', busy:'忙碌'};
-const origins = {public_calendar:'公共日历', reference:'检索参考 · 待核对', generated:'模型创作 / 推定', manual:'手动设置'};
+const origins = {public_calendar:'公共日历', reference:'检索参考 · 待核对', generated:'模型创作 / 推定', manual:'手动设置', recurring:'重复纪念日规则'};
 const kinds = {festival:'节日', vacation:'休假', activity:'活动', anniversary:'纪念日'};
 const sendLabels = {generating:'正在生成补回',sending:'正在发送',accepted:'平台发送调用已通过',uncertain:'发送结果待核对',unmatched:'平台未匹配',failed:'发送失败',paused:'已暂停',deferred:'等待可联系',unverified:'尚未验证'};
-const titles = {today:'日程总览', weekly:'角色与周表', calendar:'节日与活动', queues:'待回留言', settings:'运行设置', diagnostics:'运行诊断', diary:'生活日记'};
+const titles = {today:'日程总览', weekly:'角色与周表', calendar:'节日与活动', queues:'待回留言', settings:'运行设置', diagnostics:'运行诊断', diary:'生活日记', workbench:'预演与撤销'};
 const tabTransition = new ContentTransition();
 const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const isoDate = date => date.toISOString().slice(0,10);
@@ -21,7 +21,10 @@ let state = null, detail = {}, tab = 'today', selected = new Set(), dirty = fals
 let dirtyKinds = new Set();
 let diary = null, diaryLoading = 0, autoPersonas = new Set();
 let detailSelection = null, detailLoading = false, saving = false, followRoleToday = true;
-function renderDraftStatus() { $('draft-status').textContent = dirty || dirtySettings ? '● 有未保存的修改' : ''; }
+let recurrenceData = null, recurrenceDraft = [], recurrenceDirty = false, recurrenceLoading = 0, recurrenceEdit = null;
+let historyData = null, historyLoading = 0, previewData = null, previewLoading = 0, previewBusy = false;
+function hasPersonaDraft() {return dirty || recurrenceDirty;}
+function renderDraftStatus() { $('draft-status').textContent = hasPersonaDraft() || dirtySettings ? '● 有未保存的修改' : ''; }
 function markDirty(kind) { dirty = true; dirtyKinds.add(kind); renderDraftStatus(); }
 let edit = null, pollTimer = null, refreshInFlight = false, diagnostics = null, boundary = null;
 const minutes = value => /^\d{2}:\d{2}$/.test(value || '') ? Number(value.slice(0,2))*60+Number(value.slice(3)) : NaN;
@@ -43,10 +46,12 @@ function switchTab(next) {
   document.querySelectorAll('.tab').forEach(el => el.hidden = el.id !== tab);
   document.querySelectorAll('nav button').forEach(el => {el.classList.toggle('active', el.dataset.tab === tab);el.setAttribute('aria-pressed',el.dataset.tab === tab);});
   $('page-title').textContent = titles[tab]; $('persona-toolbar').hidden = ['settings','queues','diagnostics'].includes(tab);
-  $('generate').hidden = tab === 'diary';
+  $('generate').hidden = ['diary','workbench'].includes(tab);
   tabTransition.reveal($(tab), window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   if(next==='diagnostics') action(loadDiagnostics);
   if(next==='diary') action(loadDiary);
+  if(next==='calendar')action(()=>loadRecurrences());
+  if(next==='workbench'){renderPreviewSessions();action(loadHistory);}
 }
 document.querySelectorAll('nav button').forEach(el => { el.setAttribute('aria-label',titles[el.dataset.tab]); el.addEventListener('click', () => switchTab(el.dataset.tab)); });
 document.querySelector('.brand').onclick=event=>{event.preventDefault();switchTab('today');};
@@ -58,6 +63,11 @@ function setGenerationBusy(busy) {
   $('generate-diary').disabled = !editable || !diary?.can_generate;
   $('diary-latest').disabled = locked || !diary?.entries?.length;
   document.querySelectorAll('[data-diary-date]').forEach(el=>el.disabled=locked);
+  document.querySelectorAll('#add-recurrence,#save-recurrences,[data-rule-edit],[data-rule-delete],#recurrence-form input,#recurrence-form select,#recurrence-form textarea,#recurrence-form button[type="submit"]').forEach(el=>el.disabled=!editable || !recurrenceMatchesSelection());
+  $('refresh-recurrences').disabled=locked;
+  document.querySelectorAll('#preview-run,#preview-model').forEach(el=>el.disabled=locked||previewBusy||!detailMatchesSelection());
+  $('refresh-history').disabled=locked;
+  document.querySelectorAll('[data-restore]').forEach(el=>el.disabled=locked||el.dataset.restorable!=='true');
 }
 function controlsLocked() {
   return generating || detailLoading || saving;
@@ -231,7 +241,7 @@ function renderDetail() {
   $('calendar-year').textContent = $('date').value.slice(0,4);
   $('calendar-notices').textContent = (detail.calendar?.notes || []).join('；');
   $('event-count').textContent=`（${events.length} 项）`;
-  $('event-list').innerHTML = events.length ? events.map((row,index)=>({row,index})).sort((a,b)=>a.row.start.localeCompare(b.row.start)).map(({row,index}) => `<article class="card"><div class="event-stamp" aria-hidden="true"><small>${Number(row.start.slice(5,7))} 月</small><strong>${row.start.slice(8)}</strong></div><div class="card-content"><div class="card-meta"><span>${escape(row.start)}${row.start !== row.end ? ' → '+escape(row.end) : ''}</span><span class="badge">${escape(kinds[row.kind])}${row.day_off ? ' · 休假' : ''}</span><small>${escape(origins[row.origin] || row.origin)}</small></div><div class="card-title">${escape(row.title)}</div><p>${escape(row.description)}</p><div>${(row.source_urls || []).filter(u=>u.startsWith('https://')).map((u,i)=>`<a href="${escape(u)}" target="_blank" rel="noopener noreferrer">参考 ${i+1} ↗</a>`).join(' · ')}</div></div><div class="actions"><button data-edit="event" data-index="${index}" aria-label="编辑${escape(row.title)}">${icon('pen')}</button><button data-delete="event" data-index="${index}" class="delete" aria-label="删除${escape(row.title)}">${icon('trash')}</button></div></article>`).join('') : empty('节庆也属于角色的世界', '选择适用的真实节日、原作活动，或创造自己的世界观事件。');
+  $('event-list').innerHTML = events.length ? events.map((row,index)=>({row,index})).sort((a,b)=>a.row.start.localeCompare(b.row.start)).map(({row,index}) => `<article class="card"><div class="event-stamp" aria-hidden="true"><small>${Number(row.start.slice(5,7))} 月</small><strong>${row.start.slice(8)}</strong></div><div class="card-content"><div class="card-meta"><span>${escape(row.start)}${row.start !== row.end ? ' → '+escape(row.end) : ''}</span><span class="badge">${escape(kinds[row.kind])}${row.day_off ? ' · 休假' : ''}</span><small>${escape(origins[row.origin] || row.origin)}</small></div><div class="card-title">${escape(row.title)}</div><p>${escape(row.description)}</p><div>${(row.source_urls || []).filter(u=>u.startsWith('https://')).map((u,i)=>`<a href="${escape(u)}" target="_blank" rel="noopener noreferrer">参考 ${i+1} ↗</a>`).join(' · ')}</div></div><div class="actions">${row.origin==='recurring'||row.recurrence_id?'<span class="hint">在下方规则中编辑</span>':`<button data-edit="event" data-index="${index}" aria-label="编辑${escape(row.title)}">${icon('pen')}</button><button data-delete="event" data-index="${index}" class="delete" aria-label="删除${escape(row.title)}">${icon('trash')}</button>`}</div></article>`).join('') : empty('节庆也属于角色的世界', '选择适用的真实节日、原作活动，或创造自己的世界观事件。');
   setGenerationBusy(generating);
 }
 function renderSessions() {
@@ -243,7 +253,8 @@ function renderSessions() {
 }
 function renderChatScope() {
   const scope=$('chat-scope').value;
-  $('whitelist-selection').hidden=scope!=='whitelist';
+  $('whitelist-selection').hidden=scope!=='whitelist'&&!$('diary-chat-enabled').checked;
+  $('diary-whitelist-status').textContent=$('diary-chat-enabled').checked?(selected.size?`已选 ${selected.size} 个日记素材会话。保存并启用后开始采集；聊天控制范围不会扩大这一名单。`:'当前白名单为空：日记只参考日程，不会读取任何聊天。'):'聊天素材已关闭，日记只参考当天日程与活动。';
   $('chat-scope-note').textContent=scope==='all'?'明确选择所有聊天：保存并启用插件后，所有触发聊天的会话都会受日程影响。':scope==='whitelist'?(selected.size?`已选 ${selected.size} 个会话。保存并启用插件后，仅这些聊天受日程影响。`:'白名单为空：不会控制任何聊天。先勾选会话或手动添加来源 ID。'):'不控制任何聊天。日程与日记仍可独立生成，聊天不会因作息而被延迟或取消。';
 }
 function renderAdaptations() {
@@ -277,7 +288,7 @@ $('refresh-diagnostics').onclick=()=>action(loadDiagnostics);
 $('diagnostic-session').onchange=()=>action(loadDiagnostics);
 function renderSettings() {
   const s = state.settings;
-  for (const [id,key] of Object.entries({enabled:'enabled','search-enabled':'search_enabled','diary-enabled':'diary_enabled','auto-schedule-enabled':'auto_schedule_enabled','canvas-integration-enabled':'canvas_integration_enabled','adaptive-enabled':'adaptive_enabled','transition-notice-enabled':'transition_notice_enabled'})) $(id).checked = Boolean(s[key]);
+  for (const [id,key] of Object.entries({enabled:'enabled','search-enabled':'search_enabled','diary-enabled':'diary_enabled','diary-chat-enabled':'diary_chat_enabled','auto-schedule-enabled':'auto_schedule_enabled','canvas-integration-enabled':'canvas_integration_enabled','adaptive-enabled':'adaptive_enabled','transition-notice-enabled':'transition_notice_enabled'})) $(id).checked = key==='diary_chat_enabled'?s[key]!==false:Boolean(s[key]);
   for (const [id,key] of Object.entries({'default-timezone':'timezone','slow-min':'slow_min_seconds','slow-max':'slow_max_seconds','queue-limit':'queue_limit','queue-expire':'queue_expire_hours','diary-limit':'diary_limit','transition-notice-minutes':'transition_notice_minutes','adaptive-max-delay-minutes':'adaptive_max_delay_minutes','active-conversation-minutes':'active_conversation_minutes','adaptive-review-interval-seconds':'adaptive_review_interval_seconds'})) $(id).value = s[key];
   $('chat-scope').value=s.whitelist_enabled?'whitelist':s.all_chats_enabled?'all':'none';
   $('auto-schedule-time').value = s.auto_schedule_time || '00:00';
@@ -353,8 +364,11 @@ async function loadDetail({followToday=false} = {}) {
     }
     if(ticket!==loading)return false;
     detail=data;detailSelection=selection;$('persona').value=selection.personaId;$('date').value=selection.date;
+    syncPersonaTools(selection);
     diary=null;dirty=false;dirtyKinds.clear();renderDraftStatus();calendarMonth=selection.date.slice(0,7);renderDetail();recoverJob();
     if(tab==='diary')await loadDiary();
+    if(tab==='calendar')action(()=>loadRecurrences());
+    if(tab==='workbench'){renderPreviewSessions();action(loadHistory);}
     return true;
   } catch(error) {
     if(ticket!==loading)return false;
@@ -379,6 +393,8 @@ function renderDiary() {
   $('diary-count').textContent=`${entries.length} 篇`;
   $('diary-date').textContent=$('date').value || '—';
   $('diary-policy').textContent=diary ? `${diary.timezone} · 当地今天 ${diary.today} · ${diary.automatic?'跨日后自动归档':'自动归档已关闭，可手动写已结束的日子'}` : '选择人设，翻开属于这个世界的日记。';
+  const material=diary?.chat_material || {},archivedMaterial=entry?.source?.chat_context;
+  $('diary-materials').textContent=diary?(material.enabled?`当前可用聊天素材：${material.message_count || 0} 条 · ${material.conversation_count || 0} 个会话${material.truncated?' · 已按上限选取':''} · 白名单 ${diary.chat_whitelist_count || 0} 个`: '聊天素材未启用：按已保存日程与活动写日记'):'日程与白名单聊天，共同组成这一天的回忆。';
   $('diary-list').innerHTML=entries.filter(e=>`${e.date} ${e.title} ${e.mood}`.toLowerCase().includes(query)).map(e=>`<button data-diary-date="${escape(e.date)}" class="journal-entry ${e.date===$('date').value?'selected':''}" aria-pressed="${e.date===$('date').value}"><span>${escape(e.date)} <i>↗</i></span><strong>${escape(e.title)}</strong><small>${escape(e.mood || '生活片段')}</small></button>`).join('') || empty(query?'没有找到这段回忆':'日记尚未归档',query?'试试其他日期、标题或心情。':'先保存日程，等角色的一天结束后，回忆会出现在这里。');
   $('diary-empty').hidden=Boolean(entry);$('diary-content').hidden=!entry;
   $('diary-empty-reason').textContent=diary?.can_generate?'这一天已结束，点击「写这一天的日记」回顾已保存的安排。':diary?.reason || '选择过去的日期，或从目录中翻开一篇日记。';
@@ -392,12 +408,134 @@ function renderDiary() {
     const source=entry.source?.schedule || {};
     $('diary-source-summary').textContent=source.summary || '旧篇目没有日程快照。';
     $('diary-source-slots').innerHTML=(source.slots || []).map(r=>`<div><time>${escape(times(r))}</time><span>${escape(r.title)}</span></div>`).join('');
+    $('diary-chat-source').textContent=archivedMaterial?`归档时参考了 ${archivedMaterial.message_count || 0} 条文字、${archivedMaterial.conversation_count || 0} 个会话${archivedMaterial.truncated?'，素材按上限选取':''}。只保留数量摘要，不在日记快照中附带原始聊天。`:'这篇日记只记录了日程依据，未归档聊天素材。';
   }
   setGenerationBusy(generating);
 }
 $('diary-search').oninput=renderDiary;
 $('diary-list').addEventListener('click',event=>{const button=event.target.closest('[data-diary-date]');if(button)action(()=>chooseDate(button.dataset.diaryDate));});
 $('diary-latest').onclick=()=>action(()=>chooseDate(diary.entries[0].date));
+function syncPersonaTools(selection) {
+  if(recurrenceData?.persona_id!==selection.personaId){recurrenceData=null;recurrenceDraft=[];recurrenceDirty=false;recurrenceLoading++;renderRecurrences();}
+  if(historyData?.persona_id!==selection.personaId){historyData=null;historyLoading++;renderHistory();}
+  if(previewData?.persona_id!==selection.personaId||previewData?.date!==selection.date){previewData=null;previewLoading++;previewBusy=false;renderPreview();}
+  renderDraftStatus();
+}
+function recurrenceMatchesSelection() {return recurrenceData?.persona_id===$('persona').value;}
+async function loadRecurrences({force=false}={}) {
+  const pid=$('persona').value,ticket=++recurrenceLoading;
+  if(!pid){recurrenceData=null;recurrenceDraft=[];recurrenceDirty=false;renderRecurrences();return;}
+  if(recurrenceMatchesSelection()&&recurrenceDirty&&!force){renderRecurrences();return;}
+  $('recurrence-status').textContent='正在读取重复规则…';
+  try {
+    const data=await api('GET','recurrences',{persona_id:pid,date:$('date').value});
+    if(ticket!==recurrenceLoading||pid!==$('persona').value)return;
+    if(data.persona_id!==pid)throw new Error('重复规则的人设不匹配，请重新加载。');
+    recurrenceData=data;recurrenceDraft=structuredClone(data.rules || []);recurrenceDirty=false;renderRecurrences();renderDraftStatus();
+  } catch(error){if(ticket!==recurrenceLoading||pid!==$('persona').value)return;$('recurrence-status').textContent='重复规则加载失败：'+(error.message || '请重试');throw error;}
+  finally {setGenerationBusy(generating);}
+}
+function renderRecurrences() {
+  $('recurrence-count').textContent=`${recurrenceDraft.length} 项`;
+  $('recurrence-status').textContent=recurrenceDirty?'● 规则草稿尚未保存':recurrenceMatchesSelection()?'已读取保存的规则 · 自动展开到每年活动':'选择人设后读取规则';
+  $('recurrence-list').innerHTML=recurrenceDraft.map((rule,index)=>`<article class="recurrence-row"><div class="recurrence-date"><strong>${String(rule.month).padStart(2,'0')}.${String(rule.day).padStart(2,'0')}</strong><small>每年${rule.duration_days>1?' · '+escape(rule.duration_days)+' 天':''}</small></div><div class="recurrence-copy"><div class="card-meta"><span class="badge ${rule.enabled?'free':'busy'}">${rule.enabled?'启用':'已停用'}</span><span>${escape(kinds[rule.kind] || rule.kind)}${rule.day_off?' · 休假':''}</span><span>${rule.calendar==='fictional'?'虚构历法 · 公历映射':'公历'}</span></div><h3>${escape(rule.title)}</h3>${rule.description?`<p>${escape(rule.description)}</p>`:''}${rule.mapping?`<p class="hint">映射：${escape(rule.mapping)}</p>`:''}<small>${rule.start_year||rule.end_year?`${rule.start_year || '不限'} ～ ${rule.end_year || '不限'} 年`:'每年延续'}${Number(rule.month)===2&&Number(rule.day)===29?' · 平年'+(rule.leap_policy==='feb28'?'改在 2 月 28 日':'跳过'):''}</small></div><div class="actions"><button data-rule-edit="${index}" aria-label="编辑重复规则${escape(rule.title)}">${icon('pen')}</button><button data-rule-delete="${index}" class="delete" aria-label="删除重复规则${escape(rule.title)}">${icon('trash')}</button></div></article>`).join('') || empty('为特别的日子留一个位置','添加生日、约定或世界观活动；以后生成新年份，也会保留这些规则。');
+  setGenerationBusy(generating);
+}
+function openRecurrence(index=-1) {
+  requireDetailReady();if(!recurrenceMatchesSelection())throw new Error('请先加载当前人设的重复规则。');
+  const row=index>=0?recurrenceDraft[index]:{title:'',kind:'anniversary',calendar:'gregorian',month:Number($('date').value.slice(5,7)),day:Number($('date').value.slice(8)),duration_days:1,leap_policy:'skip',enabled:true};
+  if(!row)throw new Error('规则已变化，请重新打开。');
+  recurrenceEdit={index,personaId:$('persona').value};
+  for(const [id,key] of Object.entries({'rule-title':'title','rule-kind':'kind','rule-calendar':'calendar','rule-month':'month','rule-day':'day','rule-duration':'duration_days','rule-leap':'leap_policy','rule-start-year':'start_year','rule-end-year':'end_year','rule-mapping':'mapping','rule-description':'description'}))$(id).value=row[key] ?? '';
+  $('rule-day-off').checked=Boolean(row.day_off);$('rule-enabled').checked=row.enabled!==false;
+  $('recurrence-error').textContent='';$('recurrence-title').textContent=index>=0?'编辑重复纪念日':'添加重复纪念日';renderRuleMapping();$('recurrence-editor').showModal();
+}
+function renderRuleMapping() {$('rule-mapping-label').hidden=$('rule-calendar').value!=='fictional';$('rule-mapping').required=$('rule-calendar').value==='fictional';}
+function applyRecurrence() {
+  requireDetailReady();if(recurrenceEdit?.personaId!==$('persona').value||!recurrenceMatchesSelection())throw new Error('人设已变化，请关闭编辑后重试。');
+  const old=recurrenceDraft[recurrenceEdit.index] || {},row={...old,title:$('rule-title').value.trim(),kind:$('rule-kind').value,calendar:$('rule-calendar').value,month:Number($('rule-month').value),day:Number($('rule-day').value),duration_days:Number($('rule-duration').value),leap_policy:$('rule-leap').value,mapping:$('rule-mapping').value.trim(),description:$('rule-description').value.trim(),day_off:$('rule-day-off').checked,enabled:$('rule-enabled').checked};
+  if(!row.title)throw new Error('请填写名称。');
+  if(!Number.isInteger(row.month)||row.month<1||row.month>12||!Number.isInteger(row.day)||row.day<1||row.day>new Date(Date.UTC(2000,row.month,0)).getUTCDate())throw new Error('请填写有效的月份和日期。');
+  if(!Number.isInteger(row.duration_days)||row.duration_days<1||row.duration_days>366)throw new Error('持续时间应为 1～366 天。');
+  for(const [id,key] of [['rule-start-year','start_year'],['rule-end-year','end_year']]){const value=$(id).value;if(value){row[key]=Number(value);if(!Number.isInteger(row[key])||row[key]<1970||row[key]>2100)throw new Error('年份应为 1970～2100。');}else delete row[key];}
+  if(row.start_year&&row.end_year&&row.start_year>row.end_year)throw new Error('结束年份不能早于开始年份。');
+  if(row.calendar==='fictional'&&!row.mapping)throw new Error('请说明虚构历法如何映射到公历日期。');
+  if(recurrenceEdit.index<0){if(recurrenceDraft.length>=100)throw new Error('最多保留 100 项重复规则。');recurrenceDraft.push(row);}else recurrenceDraft[recurrenceEdit.index]=row;
+  recurrenceDirty=true;renderDraftStatus();renderRecurrences();$('recurrence-editor').close();notice('规则已加入草稿，请保存重复纪念日。');
+}
+async function saveRecurrences() {
+  requireDetailReady();if(!recurrenceMatchesSelection())throw new Error('请先加载当前人设的重复规则。');
+  const pid=$('persona').value;
+  if(!await askConfirm('保存重复规则会更新年度活动，相关生成日程可能需要重新生成；手工时段保留。继续？'))return;
+  requireDetailReady();if(pid!==$('persona').value||!recurrenceMatchesSelection())throw new Error('人设已变化，请重新确认。');const rules=structuredClone(recurrenceDraft),pending=[...dirtyKinds],draft=structuredClone(detail);
+  saving=true;setGenerationBusy(generating);
+  try {await api('POST','recurrences-save',{persona_id:pid,rules});recurrenceDirty=false;await loadRecurrences({force:true});await loadDetail();
+    for(const kind of pending){if(kind==='calendar'&&draft.calendar){const recurring=(detail.calendar?.events || []).filter(row=>row.origin==='recurring'||row.recurrence_id);detail.calendar={...draft.calendar,events:[...draft.calendar.events.filter(row=>row.origin!=='recurring'&&!row.recurrence_id),...recurring]};}else detail[kind]=draft[kind];markDirty(kind);}if(pending.length)renderDetail();
+    notice('重复纪念日已保存，跨年生成会自动带入。'+(pending.length?'其他页面的未保存修改仍保留。':''));}
+  finally {saving=false;recoverJob();setGenerationBusy(generating);renderDraftStatus();}
+}
+$('add-recurrence').onclick=()=>action(()=>openRecurrence());
+$('refresh-recurrences').onclick=()=>action(async()=>{if(recurrenceDirty&&!await askConfirm('重新读取会放弃重复规则草稿，继续？'))return;await loadRecurrences({force:true});});
+$('save-recurrences').onclick=()=>action(saveRecurrences);
+$('rule-calendar').onchange=renderRuleMapping;
+for(const id of ['close-recurrence','cancel-recurrence'])$(id).onclick=()=>$('recurrence-editor').close();
+$('recurrence-form').onsubmit=event=>{event.preventDefault();try {applyRecurrence();}catch(error){$('recurrence-error').textContent=error.message;}};
+$('recurrence-list').addEventListener('click',event=>action(async()=>{
+  if(controlsLocked()||!recurrenceMatchesSelection())return;
+  const edit=event.target.closest('[data-rule-edit]'),del=event.target.closest('[data-rule-delete]');
+  if(edit)openRecurrence(Number(edit.dataset.ruleEdit));
+  if(del&&await askConfirm('从草稿中删除这项重复规则？保存后生效。')){requireDetailReady();recurrenceDraft.splice(Number(del.dataset.ruleDelete),1);recurrenceDirty=true;renderDraftStatus();renderRecurrences();}
+}));
+function renderPreviewSessions() {
+  const previous=$('preview-session').value;
+  $('preview-session').innerHTML='<option value="">仅查看角色安排</option>'+(state?.sessions || []).filter(s=>s.persona_id===$('persona').value).map(s=>`<option value="${escape(s.umo)}">${escape(s.title || s.umo)}</option>`).join('');
+  if((state?.sessions || []).some(s=>s.umo===previous&&s.persona_id===$('persona').value))$('preview-session').value=previous;
+}
+async function runPreview(evaluate=false) {
+  requireDetailReady();if(previewBusy)return;
+  const selection={...detailSelection},ticket=++previewLoading;
+  const payload={persona_id:selection.personaId,date:selection.date,time:$('preview-time').value,message:$('preview-message').value,umo:$('preview-session').value,evaluate,active_conversation:$('preview-active').checked};
+  if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(payload.time))throw new Error('请输入有效的角色当地时间。');
+  previewBusy=true;previewData=null;renderPreview();$('preview-loading').textContent=evaluate?'模型正在权衡…':'正在读取保存的安排…';setGenerationBusy(generating);
+  try {const result=await api('POST','preview',payload);if(ticket!==previewLoading||!detailMatchesSelection()||selection.personaId!==detailSelection.personaId||selection.date!==detailSelection.date)return;if(result.persona_id!==selection.personaId||result.date!==selection.date)throw new Error('预演结果与当前人设或日期不符，请重试。');previewData={...result,requested_evaluation:evaluate};renderPreview();}
+  catch(error){if(ticket!==previewLoading)return;$('preview-result').innerHTML=empty('这次预演未完成',error.message || '请检查已保存日程后重试。');throw error;}
+  finally {if(ticket===previewLoading){previewBusy=false;$('preview-loading').textContent='';setGenerationBusy(generating);}}
+}
+function renderPreview() {
+  const result=previewData;
+  if(!result){$('preview-result').innerHTML=empty('留一个时刻给角色','选择日期、时间和会话，再运行预演。');$('preview-loading').textContent='';return;}
+  const base=result.base_activity || {},effective=result.effective_activity || {},scope=result.scope || {},decision=result.decision;
+  const behavior=scope.command_bypass?'已注册命令优先，交给 AstrBot 处理':!scope.allowed?'当前会话不受日程拦截':result.would_queue?(result.status==='busy'?'静默暂存，恢复联系后合并补回':'暂存消息，延迟后合并回复'):'正常进入聊天回复';
+  $('preview-result').innerHTML=`<div class="forecast-heading"><span class="badge ${escape(result.status)}">${escape(labels[result.status] || result.status)}</span><strong>${escape(result.date)} ${escape(result.time)}</strong><small>${escape(result.timezone)}</small></div><h3 class="forecast-behavior">${escape(behavior)}</h3><dl class="forecast-facts"><div><dt>基础活动</dt><dd>${escape(base.title || '未安排')} <small>${escape(base.start || '')}–${escape(base.end || '')}</small></dd></div><div><dt>最终活动</dt><dd>${escape(effective.title || base.title || '未安排')}</dd></div><div><dt>慢回范围</dt><dd>${result.delay_seconds?escape(result.delay_seconds.join('～'))+' 秒':'不适用'}</dd></div><div><dt>下次可联系</dt><dd>${result.next_contact_at?escape(formatInstant(result.next_contact_at)):'后续尚未安排'}</dd></div></dl><p class="forecast-reason">${escape(result.reason || scope.reason || '')}</p>${result.upcoming_activity?`<p class="hint">接下来：${escape(result.upcoming_activity.slot?.title || result.upcoming_activity.title || '下一项安排')}</p>`:''}${decision?`<div class="forecast-decision"><span class="section-code">MODEL / ONE JUDGMENT</span><p>${escape(({keep:'按原安排',defer:'有限延后',brief_exception:'短暂回复窗口'})[decision.action] || decision.action)}${decision.delay_minutes?' · '+escape(decision.delay_minutes)+' 分钟':''}</p><p>${escape(decision.reason || '')}</p></div>`:''}<p class="hint">${result.model_evaluated?'已取得日程模型的模拟判断':result.requested_evaluation?'未采用模型调整，保留基础策略':'未调用模型'} · 只读结果，没有暂存消息、发送回复或保存日程调整。</p>`;
+}
+$('preview-run').onclick=()=>action(()=>runPreview(false));
+$('preview-model').onclick=()=>action(()=>runPreview(true));
+async function loadHistory() {
+  const pid=$('persona').value,ticket=++historyLoading;
+  if(!pid){historyData=null;renderHistory();return;}
+  $('history-list').innerHTML='<p class="hint">正在读取编辑快照…</p>';
+  try {const data=await api('GET','history',{persona_id:pid});
+    if(ticket!==historyLoading||pid!==$('persona').value)return;
+    if(data.persona_id!==pid)throw new Error('快照的人设不匹配，请刷新重试。');
+    historyData=data;renderHistory();
+  } catch(error){if(ticket!==historyLoading||pid!==$('persona').value)return;$('history-list').innerHTML=empty('快照暂时未能读取',error.message || '请稍后刷新。');throw error;}
+}
+function renderHistory() {
+  const entries=historyData?.entries || [];
+  $('history-count').textContent=`${entries.length} / ${historyData?.limit || 20} 条`;
+  $('history-list').innerHTML=entries.map(row=>`<article class="history-row"><div class="history-mark" aria-hidden="true">↶</div><div class="history-copy"><div class="card-meta"><time>${escape(formatInstant(row.at))}</time><span>${escape(row.date || '')}</span></div><h3>${escape(row.label || row.kind)}</h3><ul>${(row.changes || []).map(change=>`<li>${escape(change)}</li>`).join('')}</ul>${!row.can_restore?'<p class="hint">人设已变化，保留记录供查看。</p>':''}</div><button data-restore="${escape(row.id)}" data-restorable="${Boolean(row.can_restore)}" ${row.can_restore?'':'disabled'}>恢复这份快照</button></article>`).join('') || empty('还没有编辑快照','下一次保存编辑前会自动留存，可从这里找回之前的安排。');
+  setGenerationBusy(generating);
+}
+async function restoreSnapshot(id) {
+  requireDetailReady();const pid=$('persona').value;
+  if(historyData?.persona_id!==pid||!historyData.entries.some(row=>row.id===id&&row.can_restore))throw new Error('这份快照当前不可恢复，请刷新列表。');
+  if(!await askConfirm((hasPersonaDraft()?'当前未保存的日程和重复规则草稿会被放弃。':'')+'恢复会替换这个角色的生活安排，并先保存当前状态供再次恢复。聊天队列和日记保持独立。继续？'))return;
+  requireDetailReady();if(pid!==$('persona').value||historyData?.persona_id!==pid)throw new Error('人设已变化，请重新选择快照。');saving=true;setGenerationBusy(generating);
+  try {await api('POST','restore',{persona_id:pid,id});recurrenceData=null;recurrenceDraft=[];recurrenceDirty=false;await loadDetail();await loadHistory();if(tab==='calendar')await loadRecurrences({force:true});notice('已恢复编辑快照；恢复前状态也已留存，可在列表中找回。');}
+  finally {saving=false;recoverJob();setGenerationBusy(generating);}
+}
+$('refresh-history').onclick=()=>action(loadHistory);
+$('history-list').addEventListener('click',event=>{const button=event.target.closest('[data-restore]');if(button)action(()=>restoreSnapshot(button.dataset.restore));});
 function getRows(type) {
   if (type === 'week') { detail.profile ||= {weekly:[]}; return detail.profile.weekly; }
   if (type === 'event') { detail.calendar ||= {events:[]}; return detail.calendar.events; }
@@ -548,7 +686,7 @@ async function generate(scope) {
   requireDetailReady();
   if(scope==='diary') {
     if(!diary?.can_generate)throw new Error(diary?.reason || '请选择已结束且有日程的日期。');
-    if((dirty || diary.entry)&&!await askConfirm('按这一天保存的日程重新写日记，成功后替换这一篇；未保存的日程修改会丢弃。继续？'))return;
+    if((dirty || diary.entry)&&!await askConfirm('按这一天保存的日程和可用的白名单聊天重新写日记，成功后替换这一篇；未保存的日程修改会丢弃。继续？'))return;
   } else if((dirty || scope!=='day') && !await askConfirm(scope==='profile'?'重新分析会重建未锁定的档案、周表、活动和当天安排。已保存的锁定时段保留，未保存修改会丢弃，继续？':scope==='calendar'?'重新生成会替换全年活动及相关日程。已保存的锁定时段保留，继续？':'重新生成会覆盖未保存修改，已保存的锁定时段保留，继续？')) return;
   setGenerationBusy(true);
   try {
@@ -600,7 +738,7 @@ $('save-settings').onclick=()=>action(async()=>{
   if(scope==='selected'&&!autoPersonas.size)throw new Error('请至少选择一个主动生成人设，或改用“所有已分析角色”。');
   if(!/^([01]\d|2[0-3]):[0-5]\d$/.test($('auto-schedule-time').value))throw new Error('请输入有效的角色当地生成时间。');
   const chatScope=$('chat-scope').value;
-  const payload={enabled:$('enabled').checked,whitelist_enabled:chatScope==='whitelist',all_chats_enabled:chatScope==='all',whitelist:[...selected],schedule_provider_id:$('schedule-provider').value,reply_provider_id:$('reply-provider').value,diary_provider_id:$('diary-provider').value,diary_enabled:$('diary-enabled').checked,diary_limit:Number($('diary-limit').value),auto_schedule_enabled:$('auto-schedule-enabled').checked,auto_schedule_time:$('auto-schedule-time').value,auto_schedule_personas:scope==='selected'?[...autoPersonas]:[],canvas_integration_enabled:$('canvas-integration-enabled').checked,adaptive_enabled:$('adaptive-enabled').checked,transition_notice_enabled:$('transition-notice-enabled').checked,transition_notice_minutes:Number($('transition-notice-minutes').value),adaptive_max_delay_minutes:Number($('adaptive-max-delay-minutes').value),active_conversation_minutes:Number($('active-conversation-minutes').value),adaptive_review_interval_seconds:Number($('adaptive-review-interval-seconds').value),timezone:$('default-timezone').value,slow_min_seconds:Number($('slow-min').value),slow_max_seconds:Number($('slow-max').value),queue_limit:Number($('queue-limit').value),queue_expire_hours:Number($('queue-expire').value),search_enabled:$('search-enabled').checked};
+  const payload={enabled:$('enabled').checked,whitelist_enabled:chatScope==='whitelist',all_chats_enabled:chatScope==='all',whitelist:[...selected],schedule_provider_id:$('schedule-provider').value,reply_provider_id:$('reply-provider').value,diary_provider_id:$('diary-provider').value,diary_enabled:$('diary-enabled').checked,diary_chat_enabled:$('diary-chat-enabled').checked,diary_limit:Number($('diary-limit').value),auto_schedule_enabled:$('auto-schedule-enabled').checked,auto_schedule_time:$('auto-schedule-time').value,auto_schedule_personas:scope==='selected'?[...autoPersonas]:[],canvas_integration_enabled:$('canvas-integration-enabled').checked,adaptive_enabled:$('adaptive-enabled').checked,transition_notice_enabled:$('transition-notice-enabled').checked,transition_notice_minutes:Number($('transition-notice-minutes').value),adaptive_max_delay_minutes:Number($('adaptive-max-delay-minutes').value),active_conversation_minutes:Number($('active-conversation-minutes').value),adaptive_review_interval_seconds:Number($('adaptive-review-interval-seconds').value),timezone:$('default-timezone').value,slow_min_seconds:Number($('slow-min').value),slow_max_seconds:Number($('slow-max').value),queue_limit:Number($('queue-limit').value),queue_expire_hours:Number($('queue-expire').value),search_enabled:$('search-enabled').checked};
   if($('clear-key').checked) payload.tavily_api_key=''; else if($('tavily-key').value.trim()) payload.tavily_api_key=$('tavily-key').value.trim();
   await api('POST','settings',payload); await loadState(true); notice(chatScope==='whitelist'&&!selected.size?'设置已保存。白名单为空，当前不会控制任何聊天。':chatScope==='none'?'设置已保存。当前不控制聊天，日程和日记仍可生成。':'设置已保存。');
 });
@@ -608,12 +746,13 @@ $('refresh-models').onclick=()=>action(async()=>{const button=$('refresh-models'
 $('session-list').addEventListener('change',event=>{if(event.target.dataset.umo) { const u=event.target.dataset.umo; event.target.checked?selected.add(u):selected.delete(u); renderChatScope(); }});
 $('session-search').oninput=renderSessions;
 $('chat-scope').onchange=renderChatScope;
+$('diary-chat-enabled').onchange=renderChatScope;
 $('auto-schedule-scope').onchange=renderAutoPersonas;
 $('auto-persona-list').addEventListener('change',event=>{const id=event.target.dataset.autoPersona;if(id){event.target.checked?autoPersonas.add(id):autoPersonas.delete(id);$('auto-persona-count').textContent=`已选 ${autoPersonas.size} 个`;}});
 $('settings').addEventListener('input',event=>{if(event.target.matches('input,select,textarea')&&event.target.id!=='session-search'){dirtySettings=true;renderDraftStatus();}});
 $('settings').addEventListener('change',event=>{if(event.target.matches('input,select,textarea')&&event.target.id!=='session-search'){dirtySettings=true;renderDraftStatus();}});
 $('add-umo').onclick=()=>action(async()=>{const u=$('manual-umo').value.trim();if(u.split(':').length<3)throw new Error('请输入完整会话来源 ID。');selected.add(u);dirtySettings=true;renderDraftStatus();$('manual-umo').value='';renderSessions();notice('已加入选择，保存设置后生效。');});
-$('refresh').onclick=()=>action(async()=>{if((dirty||dirtySettings)&&!await askConfirm('刷新会放弃未保存的修改，继续？'))return;await loadState(true);await loadDetail();notice('已刷新。');});
+$('refresh').onclick=()=>action(async()=>{if((hasPersonaDraft()||dirtySettings)&&!await askConfirm('刷新会放弃未保存的修改，继续？'))return;await loadState(true);await loadDetail();if(recurrenceDirty)await loadRecurrences({force:true});notice('已刷新。');});
 $('refresh-queues').onclick=()=>action(()=>loadState());
 let priorPersona='',priorDate='';
 async function chooseDate(value, openDay = false, {followToday=false} = {}) {
@@ -636,11 +775,11 @@ $('jump-today').onclick=()=>action(()=>chooseDate(localToday(),false,{followToda
 for(const [id,delta] of [['month-prev',-1],['month-next',1]]) $(id).onclick=()=>{const date=dateObject(calendarMonth+'-01');date.setUTCMonth(date.getUTCMonth()+delta);calendarMonth=isoDate(date).slice(0,7);renderMonth();};
 function renderWeekFilter() {document.querySelectorAll('[data-week-filter]').forEach(b=>{const active=b.dataset.weekFilter===weekFilter;b.classList.toggle('active',active);b.setAttribute('aria-pressed',active);});}
 $('week-filter').addEventListener('click',event=>{const button=event.target.closest('[data-week-filter]');if(!button)return;weekFilter=button.dataset.weekFilter;renderWeekFilter();renderDetail();});
-for (const id of ['persona','date']) $(id).onchange=()=>action(async()=>{if(controlsLocked()){restoreDetailSelection();return;}if(dirty&&!await askConfirm('切换会放弃未保存的修改，继续？')){restoreDetailSelection();return;}if(!await loadDetail({followToday:id==='persona'&&followRoleToday}))return;if(id==='date')followRoleToday=false;priorPersona=$('persona').value;priorDate=$('date').value;});
+for (const id of ['persona','date']) $(id).onchange=()=>action(async()=>{if(controlsLocked()){restoreDetailSelection();return;}if((dirty||(id==='persona'&&recurrenceDirty))&&!await askConfirm('切换会放弃未保存的修改，继续？')){restoreDetailSelection();return;}if(!await loadDetail({followToday:id==='persona'&&followRoleToday}))return;if(id==='date')followRoleToday=false;priorPersona=$('persona').value;priorDate=$('date').value;});
 const liveTimer=setInterval(()=>{if(state&&!document.hidden)updateLiveStatus();},1000);
 const stateTimer=setInterval(()=>{if(state)refreshLive();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state)refreshLive();});
-window.addEventListener('beforeunload',event=>{if(dirty||dirtySettings){event.preventDefault();event.returnValue='';}});
+window.addEventListener('beforeunload',event=>{if(hasPersonaDraft()||dirtySettings){event.preventDefault();event.returnValue='';}});
 window.addEventListener('pagehide',()=>{clearTimeout(pollTimer);clearInterval(liveTimer);clearInterval(stateTimer);tabTransition.cancel();});
 async function init() {
   $('date').value=todayInTimezone();

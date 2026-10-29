@@ -25,6 +25,7 @@ DEFAULTS = {
     "reply_provider_id": "",
     "diary_provider_id": "",
     "diary_enabled": True,
+    "diary_chat_enabled": True,
     "diary_limit": 180,
     "auto_schedule_enabled": True,
     "auto_schedule_time": "00:00",
@@ -267,7 +268,7 @@ def validate_settings(payload, previous):
     if not isinstance(payload, dict):
         raise ValueError("设置必须为对象")
     result = copy.deepcopy(previous)
-    for key in ("enabled", "whitelist_enabled", "all_chats_enabled", "search_enabled", "diary_enabled",
+    for key in ("enabled", "whitelist_enabled", "all_chats_enabled", "search_enabled", "diary_enabled", "diary_chat_enabled",
                 "auto_schedule_enabled", "canvas_integration_enabled", "adaptive_enabled", "transition_notice_enabled"):
         if key in payload:
             result[key] = boolean(payload[key])

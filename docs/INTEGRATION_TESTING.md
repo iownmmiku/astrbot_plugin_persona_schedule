@@ -8,9 +8,12 @@
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
+node --test tests/test_ui_state.cjs
 ```
 
 这些测试使用 AstrBot 接口替身，无需模型密钥或机器人账号。主要验证忙碌静默、合并补回、慢回、白名单、模型选择、任务阶段、锁定安排、队列可靠性、跨日归档、主动日程与画卷联动契约。实际测试文件以仓库 `tests/` 目录为准。
+
+Node 回归通过 VM 执行真实 `app.js`，仅替换页面渲染、DOM 和桥接。覆盖人设切换失败的选择回退与草稿保留、异步响应乱序、加载/保存时禁用编辑、键盘/拖动保护、角色时区今天与历史日期，以及失效任务解锁和网络错误重试。它不代替浏览器布局检查或真实 AstrBot 页面桥接验证。
 
 ## 2. 真实 AstrBot SDK 离线集成
 

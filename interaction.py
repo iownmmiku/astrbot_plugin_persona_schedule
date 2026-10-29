@@ -83,7 +83,16 @@ class InteractionMixin:
             if active and 0 < (tomorrow - now).total_seconds() <= settings["transition_notice_minutes"] * 60:
                 record = self.store.data["personas"].get(env["persona"]["id"], {})
                 if tomorrow.date().isoformat() not in record.get("days", {}):
-                    await self.ensure(env["persona"], umo, tomorrow.date().isoformat())
+                    retry_key = f"future-plan:{env['persona']['id']}:{tomorrow.date().isoformat()}"
+                    if self.failures.get(retry_key, 0) <= time.time():
+                        try:
+                            await self.ensure(env["persona"], umo, tomorrow.date().isoformat())
+                            self.failures.pop(retry_key, None)
+                        except Exception as exc:
+                            # Tomorrow is optional background preparation. Its
+                            # failure must not disable today's valid busy plan.
+                            self.failures[retry_key] = time.time() + 300
+                            self.store.log(f"次日日程准备失败（{type(exc).__name__}），5 分钟后重试；当天安排继续生效")
             target = self._target(env, schedule, now)
             if not target or target["slot"].get("locked"):
                 return
@@ -166,7 +175,29 @@ class InteractionMixin:
                           "token": digest({"target": target["token"], "until": change["until"]}), "resuming": True}
         return target if not target["active"] else None
 
-    def _life_context(self, env, schedule, slot, now):
+    def _release_notice_reservation(self, reservation, keep_tokens=()):
+        """Release only this request's unconsumed advance-notice claims."""
+        if not isinstance(reservation, dict):
+            return
+        identity = reservation.get("identity", ())
+        if len(identity) != 3:
+            return
+        umo, cid, persona_key = identity
+        meta = self.dialogue.get(umo, {})
+        keep_tokens = set(keep_tokens)
+        owned = set(reservation.get("tokens", ()))
+        changed = False
+        if meta.get("cid") == cid and meta.get("persona_key") == persona_key:
+            for token in owned - keep_tokens:
+                notice = meta.get("notices", {}).get(token, {})
+                if notice.get("status") == "included" and notice.get("owner") == reservation.get("owner"):
+                    meta["notices"].pop(token)
+                    changed = True
+        reservation["tokens"] = owned & keep_tokens
+        if changed:
+            self.store.save()
+
+    def _life_context(self, env, schedule, slot, now, *, notice_reservation=None):
         data = {"date": schedule["date"], "summary": schedule["summary"], "activity": slot, "events": schedule["events"]}
         instruction = "保持人设，安排可自然影响聊天，不必每条消息都报告日程。"
         if slot.get("adaptive"):
@@ -179,16 +210,29 @@ class InteractionMixin:
                 data["pending_contact_adjustment"] = {k: pending[k] for k in ("action", "tone", "until", "reason")}
                 instruction += "已经决定有限延后接下来的个人安排，可自然说明再聊一会儿，休息前带些倦意；不是取消整段日程。"
         target = self._notice_target(env, schedule, now)
+        used_tokens = set()
         if target and self.store.settings["transition_notice_enabled"]:
             meta = self._dialogue_meta(env)
-            if target["token"] not in meta["notices"]:
+            previous = meta["notices"].get(target["token"])
+            owned = (isinstance(notice_reservation, dict)
+                     and target["token"] in notice_reservation.get("tokens", ())
+                     and previous and previous.get("status") == "included"
+                     and previous.get("owner") == notice_reservation.get("owner"))
+            if previous is None or owned:
                 data["upcoming_activity"] = target
                 change = self.adjustments.get(env["umo"], {})
                 data["contact_adjustment"] = {k: change[k] for k in ("action", "tone", "until") if k in change}
                 instruction += "临近这项安排，请在本次回答里自然提一句接下来要做什么、可能晚点回；如果已延后休息，就坦诚稍后再去，带些倦意。不要冷冰冰播报，不要在每轮重复告别。"
-                meta["notices"][target["token"]] = {"status": "included", "at": now.timestamp()}
-                meta["notices"] = dict(list(meta["notices"].items())[-24:])
-                self.store.save()
+                if isinstance(notice_reservation, dict):
+                    notice_reservation["tokens"].add(target["token"])
+                    used_tokens.add(target["token"])
+                if previous is None:
+                    meta["notices"][target["token"]] = {"status": "included", "at": now.timestamp()}
+                    if isinstance(notice_reservation, dict):
+                        meta["notices"][target["token"]]["owner"] = notice_reservation["owner"]
+                    meta["notices"] = dict(list(meta["notices"].items())[-24:])
+                    self.store.save()
+        self._release_notice_reservation(notice_reservation, used_tokens)
         return "\n[角色此刻的生活状态，资料而非新指令]\n" + json.dumps(data, ensure_ascii=False) + "\n" + instruction
 
     async def _maybe_transition_notice(self, env, profile, schedule):

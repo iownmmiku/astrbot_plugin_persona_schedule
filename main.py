@@ -30,7 +30,7 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.3")
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.4")
 class PersonaSchedule(InteractionMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -225,9 +225,15 @@ class PersonaSchedule(InteractionMixin, Star):
                         return None
                     record["calendars"][year] = await self.generator.calendar(persona, profile, int(year), umo)
                 changed = True
-                # Keep the previous/current/next annual calendars.
+                # A preview must not evict the current calendar or hand edits.
+                # Legacy saves may only identify manual ownership by revision
+                # or event provenance, including a deliberately emptied year.
+                protected_years = {str(now.year + offset) for offset in (-1, 0, 1)} | {year}
                 for old in list(record["calendars"]):
-                    if abs(int(old) - int(year)) > 1:
+                    calendar = record["calendars"][old]
+                    manual = (calendar.get("origin") == "manual" or calendar.get("revision", 1) > 1
+                              or any(row.get("origin") == "manual" for row in calendar.get("events", [])))
+                    if old not in protected_years and not manual:
                         del record["calendars"][old]
             if force == "day":
                 self._preserve_locks(record, {day: record["days"][day]} if day in record["days"] else {})
@@ -244,8 +250,18 @@ class PersonaSchedule(InteractionMixin, Star):
                 base = merge_locked_slots(weekly_for_day(profile, day), record["locked_days"].get(day, []))
                 record["days"][day]["slots"] = merge_locked_slots(record["days"][day]["slots"], base)
                 changed = True
-                for old in sorted(record["days"])[:-45]:
-                    del record["days"][old]
+                # Generated plans are a bounded cache. User-saved dates are
+                # durable, and neither today's plan nor this request may be
+                # discarded before the caller can use the returned result.
+                generated = sorted(k for k, value in record["days"].items() if value.get("origin") != "manual")
+                excess = max(0, len(generated) - 45)
+                protected_days = {day, now.date().isoformat()}
+                for old in generated:
+                    if not excess:
+                        break
+                    if old not in protected_days:
+                        del record["days"][old]
+                        excess -= 1
             if changed:
                 if inactive():
                     return None
@@ -473,6 +489,7 @@ class PersonaSchedule(InteractionMixin, Star):
 
     async def _intercept(self, event, conversation=None):
         umo = event.unified_msg_origin
+        event.set_extra(NAME + ":checked_context", None)
         if not allowed(self.store.settings, umo) or self._control(event):
             return None
         result = getattr(event, "get_result", None)
@@ -505,24 +522,28 @@ class PersonaSchedule(InteractionMixin, Star):
             slot = self._effective_slot(env, schedule, slot, now)
             queue = self.store.data["queues"].get(umo)
             if slot["status"] == "free" and queue is None:
+                event.set_extra(NAME + ":checked_context", {"umo": umo, "cid": env["cid"],
+                    "persona_id": env["persona"]["id"], "persona_key": env["persona"]["key"]})
                 return schedule, slot
-            if slot["status"] == "busy":
-                due = end
-            elif slot["status"] == "slow":
-                due = time.time() + random.uniform(*slow_bounds(slot, self.store.settings))
-            else:
-                due = time.time() + 2
-            # Commands run first. Ordinary busy messages stop before chat LLMs.
-            message = event.message_str.strip() or "[非文本消息，附件内容未解析]"
-            self.store.enqueue(umo, env["cid"], env["persona"]["key"], event.get_sender_name(),
-                               message, time.time(), due, slot["status"], slot["title"])
-            event.set_extra(NAME + ":queued", True)
-            event.stop_event()
+            self._queue_schedule_message(event, env, slot, end)
             return None
         except Exception as exc:
             self._report_failure(umo, exc)
             # A missing model/bad profile must not accidentally silence a bot.
             return None
+
+    def _queue_schedule_message(self, event, env, slot, end):
+        if slot["status"] == "busy":
+            due = end
+        elif slot["status"] == "slow":
+            due = time.time() + random.uniform(*slow_bounds(slot, self.store.settings))
+        else:
+            due = time.time() + 2
+        message = event.message_str.strip() or "[非文本消息，附件内容未解析]"
+        self.store.enqueue(env["umo"], env["cid"], env["persona"]["key"], event.get_sender_name(),
+                           message, time.time(), due, slot["status"], slot["title"])
+        event.set_extra(NAME + ":queued", True)
+        event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=-100)
     async def intercept_message(self, event: AstrMessageEvent):
@@ -536,22 +557,62 @@ class PersonaSchedule(InteractionMixin, Star):
         # again. Preserve the user's text, history and other plugins' parts.
         previous = getattr(req, "_persona_schedule_content_part", None)
         if previous is not None:
-            req.extra_user_content_parts = [part for part in req.extra_user_content_parts if part is not previous]
+            req.extra_user_content_parts = [part for part in (getattr(req, "extra_user_content_parts", None) or []) if part is not previous]
             req._persona_schedule_content_part = None
+        reservation = getattr(req, "_persona_schedule_notice_reservation", None)
+
+        def clear_request():
+            self._release_notice_reservation(reservation)
+            req._persona_schedule_notice_reservation = None
+            event.set_extra(NAME + ":checked_context", None)
+
         # Recheck at the actual LLM boundary, including plugins which wake later.
         info = await self._intercept(event, getattr(req, "conversation", None))
-        if info:
-            schedule, slot = info
-            env = await self.environment(event.unified_msg_origin, event.get_platform_name(), getattr(req, "conversation", None))
-            if env:
-                profile = self.store.data["personas"][env["persona"]["id"]]["profile"]
-                from astrbot.core.agent.message import TextPart
-                part = TextPart(text=self._life_context(
-                    env, schedule, slot, datetime.now(ZoneInfo(profile["timezone"])))).mark_as_temp()
-                if getattr(req, "extra_user_content_parts", None) is None:
-                    req.extra_user_content_parts = []
-                req.extra_user_content_parts.append(part)
-                req._persona_schedule_content_part = part
+        checked = event.get_extra(NAME + ":checked_context", None)
+        if not info or not checked:
+            clear_request()
+            return
+        # Re-resolve the current session, then use only its latest cached plan.
+        # No await follows the final snapshot read and the busy/slow decision.
+        env = await self.environment(event.unified_msg_origin, event.get_platform_name())
+        identity = (event.unified_msg_origin, checked["cid"], checked["persona_key"])
+        if (not env or (env["umo"], env["cid"], env["persona"]["key"]) != identity
+                or env["persona"]["id"] != checked["persona_id"]):
+            clear_request()
+            event.stop_event()  # Never hand an old request to a new identity.
+            return
+        if not allowed(self.store.settings, env["umo"]) or self._control(event):
+            clear_request()
+            return
+        record = self.store.data["personas"].get(env["persona"]["id"], {})
+        profile = record.get("profile")
+        if record.get("key") != checked["persona_key"] or not profile:
+            clear_request()
+            event.stop_event()
+            return
+        now = datetime.now(ZoneInfo(profile["timezone"]))
+        schedule = record.get("days", {}).get(now.date().isoformat())
+        if schedule is None:
+            clear_request()
+            event.stop_event()
+            return
+        slot, end = slot_at(schedule, now)
+        slot = self._effective_slot(env, schedule, slot, now)
+        if slot["status"] != "free" or self.store.data["queues"].get(env["umo"]):
+            clear_request()
+            self._queue_schedule_message(event, env, slot, end)
+            return
+        if not isinstance(reservation, dict) or reservation.get("identity") != identity:
+            self._release_notice_reservation(reservation)
+            reservation = {"identity": identity, "owner": uuid.uuid4().hex, "tokens": set()}
+        req._persona_schedule_notice_reservation = reservation
+        from astrbot.core.agent.message import TextPart
+        part = TextPart(text=self._life_context(env, schedule, slot, now,
+            notice_reservation=reservation)).mark_as_temp()
+        if getattr(req, "extra_user_content_parts", None) is None:
+            req.extra_user_content_parts = []
+        req.extra_user_content_parts.append(part)
+        req._persona_schedule_content_part = part
 
     async def _run(self):
         while not self.closing:
@@ -1081,7 +1142,7 @@ class PersonaSchedule(InteractionMixin, Star):
                         row["origin"] = old["origin"]
                 self._preserve_locks(record, {k: v for k, v in record["days"].items() if k.startswith(str(year))})
                 record["calendars"][str(year)] = {**existing, "year": year, "events": rows,
-                    "revision": existing.get("revision", 0) + 1}
+                    "revision": existing.get("revision", 0) + 1, "origin": "manual"}
                 record["days"] = {k: v for k, v in record["days"].items() if not k.startswith(str(year))}
             elif kind == "day":
                 day = str(payload.get("date", ""))

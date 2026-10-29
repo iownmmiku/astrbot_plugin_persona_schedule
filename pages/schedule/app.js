@@ -20,6 +20,7 @@ let weekFilter = 'all', calendarMonth = '';
 let state = null, detail = {}, tab = 'today', selected = new Set(), dirty = false, dirtySettings = false, loading = 0, job = null, generating = false;
 let dirtyKinds = new Set();
 let diary = null, diaryLoading = 0, autoPersonas = new Set();
+let detailSelection = null, detailLoading = false, saving = false, followRoleToday = true;
 function renderDraftStatus() { $('draft-status').textContent = dirty || dirtySettings ? '● 有未保存的修改' : ''; }
 function markDirty(kind) { dirty = true; dirtyKinds.add(kind); renderDraftStatus(); }
 let edit = null, pollTimer = null, refreshInFlight = false, diagnostics = null, boundary = null;
@@ -51,10 +52,25 @@ document.querySelectorAll('nav button').forEach(el => { el.setAttribute('aria-la
 document.querySelector('.brand').onclick=event=>{event.preventDefault();switchTab('today');};
 function setGenerationBusy(busy) {
   generating=busy;
-  document.querySelectorAll('#generate,#generate-profile,#generate-calendar,#refresh,#persona,#date,#date-strip button,#month-grid button,#jump-today,#add-day,#add-week,#add-event,#save-day,#save-profile,#save-calendar,[data-edit],[data-delete],[data-split],[data-boundary],[data-week-day],#profile-form input,#profile-form select,#profile-form textarea').forEach(el=>el.disabled=busy);
-  $('generate-diary').disabled = busy || !diary?.can_generate;
-  $('diary-latest').disabled = busy || !diary?.entries?.length;
-  document.querySelectorAll('[data-diary-date]').forEach(el=>el.disabled=busy);
+  const locked=controlsLocked(),editable=!locked&&detailMatchesSelection();
+  document.querySelectorAll('#refresh,#persona,#date,#date-strip button,#month-grid button,#jump-today,#week-filter button').forEach(el=>el.disabled=locked);
+  document.querySelectorAll('#generate,#generate-profile,#generate-calendar,#add-day,#add-week,#add-event,#save-day,#save-profile,#save-calendar,[data-edit],[data-delete],[data-split],[data-boundary],[data-week-day],#profile-form input,#profile-form select,#profile-form textarea,#edit-form input,#edit-form select,#edit-form textarea,#edit-form button[type="submit"],#boundary-form input,#boundary-form button[type="submit"]').forEach(el=>el.disabled=!editable);
+  $('generate-diary').disabled = !editable || !diary?.can_generate;
+  $('diary-latest').disabled = locked || !diary?.entries?.length;
+  document.querySelectorAll('[data-diary-date]').forEach(el=>el.disabled=locked);
+}
+function controlsLocked() {
+  return generating || detailLoading || saving;
+}
+function detailMatchesSelection() {
+  return Boolean(detailSelection?.personaId && detailSelection.personaId===$('persona').value && detailSelection.date===$('date').value);
+}
+function requireDetailReady() {
+  if(controlsLocked())throw new Error('详情正在加载、保存或生成，请稍后再试。');
+  if(!detailMatchesSelection())throw new Error('当前人设和日期的详情尚未加载，请刷新后再操作。');
+}
+function restoreDetailSelection() {
+  if(detailSelection){$('persona').value=detailSelection.personaId;$('date').value=detailSelection.date;}
 }
 function times(row) { return `${row.start}–${row.end}`; }
 function weekdays(days) {
@@ -123,7 +139,11 @@ function renderDates() {
   }).join('');
 }
 function localToday() {
-  return new Intl.DateTimeFormat('en-CA',{timeZone:validTimezone(),year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  return todayInTimezone(validTimezone());
+}
+function todayInTimezone(timezone) {
+  const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 function renderMonth() {
   const value = $('date').value;
@@ -314,13 +334,36 @@ async function refreshLive() {
   catch(error){$('last-updated').textContent=`自动同步失败 · ${error.message || '连接中断'}`;}
   finally {refreshInFlight=false;}
 }
-async function loadDetail() {
+async function loadDetail({followToday=false} = {}) {
   const ticket = ++loading;
-  if (!$('persona').value) { detail={}; diary=null; renderDetail(); renderDiary(); return; }
-  const data = await api('GET','detail',{persona_id:$('persona').value,date:$('date').value});
-  if (ticket !== loading) return;
-  detail = data; dirty = false; dirtyKinds.clear(); renderDraftStatus(); calendarMonth=$('date').value.slice(0,7); renderDetail();recoverJob();
-  if(tab==='diary') await loadDiary();
+  const selection={personaId:$('persona').value,date:$('date').value};
+  detailLoading=true;setGenerationBusy(generating);
+  try {
+    let data={};
+    if(selection.personaId){
+      data=await api('GET','detail',{persona_id:selection.personaId,date:selection.date});
+      if(ticket!==loading)return false;
+      const running=job || state?.jobs?.some(j=>j.persona_id===selection.personaId&&j.status==='running');
+      if(followToday&&!running){
+        const today=todayInTimezone(data.profile?.timezone || state?.settings.timezone);
+        if(today!==selection.date){selection.date=today;data=await api('GET','detail',{persona_id:selection.personaId,date:today});}
+      }
+      if(ticket!==loading)return false;
+      if(data.persona_id!==selection.personaId || data.day?.date && data.day.date!==selection.date)throw new Error('返回的详情与所选人设或日期不一致，请刷新后重试。');
+    }
+    if(ticket!==loading)return false;
+    detail=data;detailSelection=selection;$('persona').value=selection.personaId;$('date').value=selection.date;
+    diary=null;dirty=false;dirtyKinds.clear();renderDraftStatus();calendarMonth=selection.date.slice(0,7);renderDetail();recoverJob();
+    if(tab==='diary')await loadDiary();
+    return true;
+  } catch(error) {
+    if(ticket!==loading)return false;
+    restoreDetailSelection();
+    throw error;
+  } finally {
+    // A late response must neither unlock nor overwrite a newer selection.
+    if(ticket===loading){detailLoading=false;recoverJob();setGenerationBusy(generating);}
+  }
 }
 
 async function loadDiary() {
@@ -361,9 +404,10 @@ function getRows(type) {
   detail.day ||= {slots:[],summary:'手动日程',events:[]}; return detail.day.slots;
 }
 function openEditor(type, index = -1, day = null) {
+  requireDetailReady();
   const row = index >= 0 ? structuredClone(getRows(type)[index]) : type === 'event' ? {start:$('date').value,end:$('date').value,kind:'activity',day_off:false} : {start:'00:00',end:'24:00',status:'free',days:[1,2,3,4,5,6,7]};
   if(type==='week'&&day)row.days=[day];
-  edit = {type,index,day}; $('edit-title').textContent = type === 'event' ? '编辑活动' : day?`编辑周${'一二三四五六日'[day-1]}时间段`:'编辑时间段'; $('edit-error').textContent = '';
+  edit = {type,index,day,selection:{...detailSelection}}; $('edit-title').textContent = type === 'event' ? '编辑活动' : day?`编辑周${'一二三四五六日'[day-1]}时间段`:'编辑时间段'; $('edit-error').textContent = '';
   $('edit-fields').innerHTML = `<label>名称<input name="title" required maxlength="160" value="${escape(row.title)}"></label>`+(type === 'event' ?
     `<div class="row2"><label>开始日期<input type="date" name="start" required value="${escape(row.start)}"></label><label>结束日期（含当天）<input type="date" name="end" required value="${escape(row.end)}"></label></div><label>活动类型<select name="kind">${Object.entries(kinds).map(([k,v])=>`<option value="${k}" ${row.kind===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="check"><input name="day_off" type="checkbox" ${row.day_off?'checked':''}>当天休假，调整常规工作 / 上课</label><label>内容与日期依据<textarea name="description" rows="4">${escape(row.description)}</textarea></label><label>参考链接（每行一个 HTTPS 链接）<textarea name="source_urls" rows="2">${escape((row.source_urls||[]).join('\n'))}</textarea></label>` :
     `${type === 'week' ? `<div class="days">${[1,2,3,4,5,6,7].map(d=>`<label><input name="days" type="checkbox" value="${d}" ${row.days.includes(d)?'checked':''}>周${'一二三四五六日'[d-1]}</label>`).join('')}</div>` : ''}<div class="row2"><label>开始（HH:MM）<input name="start" required pattern="[0-2][0-9]:[0-5][0-9]" value="${escape(row.start)}"></label><label>结束（可填 24:00）<input name="end" required pattern="[0-2][0-9]:[0-5][0-9]" value="${escape(row.end)}"></label></div><label>回复状态<select name="status">${Object.entries(labels).map(([k,v])=>`<option value="${k}" ${row.status===k?'selected':''}>${v}</option>`).join('')}</select></label><div class="row2 slow-overrides"><label>独立慢回最短（秒，选填）<input name="slow_min_seconds" type="number" min="5" max="7200" value="${escape(row.slow_min_seconds)}" placeholder="跟随默认"></label><label>独立慢回最长（秒，选填）<input name="slow_max_seconds" type="number" min="5" max="7200" value="${escape(row.slow_max_seconds)}" placeholder="跟随默认"></label></div><label class="check"><input name="locked" type="checkbox" ${row.locked?'checked':''}>锁定此安排，重新生成时保留</label><label>具体情境<textarea name="note" rows="3">${escape(row.note)}</textarea></label>`);
@@ -392,7 +436,9 @@ $('edit-form').addEventListener('input',()=>{
   } catch(error){$('edit-error').textContent=error.message;}
 });
 $('edit-form').addEventListener('submit',event=>{
-  event.preventDefault(); const form = new FormData(event.target), {type,index} = edit, rows = getRows(type);
+  event.preventDefault();
+  try {requireDetailReady();if(edit.selection.personaId!==detailSelection.personaId||edit.selection.date!==detailSelection.date)throw new Error('人设或日期已变化，请关闭编辑后重试。');}catch(error){$('edit-error').textContent=error.message;return;}
+  const form = new FormData(event.target), {type,index} = edit, rows = getRows(type);
   let row = index >= 0 ? {...rows[index]} : {};
   row.title = form.get('title').trim(); row.start = form.get('start'); row.end = form.get('end');
   if (row.start >= row.end && (type !== 'event' || row.start !== row.end)) { $('edit-error').textContent='结束必须晚于开始，跨午夜时段请拆开。'; return; }
@@ -404,6 +450,7 @@ $('edit-form').addEventListener('submit',event=>{
 });
 // Keep profile text edits when a weekly card rerenders the preview.
 $('profile-form').addEventListener('input',()=>{
+  if(controlsLocked()||!detailMatchesSelection())return;
   detail.profile ||= {weekly:[]};
   Object.assign(detail.profile,{world_type:$('world-type').value,world_name:$('world-name').value,
     timezone:$('persona-timezone').value,identity:$('identity').value,lifestyle:$('lifestyle').value,
@@ -413,6 +460,7 @@ $('profile-form').addEventListener('input',()=>{
 for (const id of ['close-editor','cancel-editor']) $(id).onclick=()=>$('editor').close();
 document.addEventListener('click',async event=>{
   const editButton=event.target.closest('[data-edit]'), del=event.target.closest('[data-delete]'), queue=event.target.closest('[data-queue]'),split=event.target.closest('[data-split]'),boundaryButton=event.target.closest('[data-boundary]');
+  if((editButton||del||split||boundaryButton)&&(controlsLocked()||!detailMatchesSelection()))return;
   if(editButton) openEditor(editButton.dataset.edit,Number(editButton.dataset.index),Number(editButton.dataset.editDay)||(editButton.dataset.edit==='week'&&/^[1-7]$/.test(weekFilter)?Number(weekFilter):null));
   if(split)openBoundary(split.dataset.split,Number(split.dataset.index),split.dataset.split==='week'&&/^[1-7]$/.test(weekFilter)?Number(weekFilter):null,true);
   if(boundaryButton)openBoundary(boundaryButton.dataset.boundary,Number(boundaryButton.dataset.index),Number(boundaryButton.dataset.day)||null);
@@ -424,6 +472,7 @@ function singleDayIndex(index,day) {
   const copy=structuredClone(row);copy.days=[day];row.days=row.days.filter(d=>d!==day);rows.push(copy);return rows.length-1;
 }
 function applyBoundary(type,index,day,value,split=false) {
+  requireDetailReady();
   const rows=getRows(type),row=rows[index],amount=minutes(value),pair=split?null:adjacentPair(type,index,day);
   if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(value))throw new Error('请输入有效的 HH:MM。');
   if(split) {
@@ -439,18 +488,19 @@ function applyBoundary(type,index,day,value,split=false) {
   markDirty(type==='week'?'profile':'day');renderDetail();
 }
 function openBoundary(type,index,day,split=false) {
+  requireDetailReady();
   const row=getRows(type)[index],pair=split?null:adjacentPair(type,index,day);if(!split&&!pair)return;
-  boundary={type,index,day,split};$('boundary-title').textContent=split?'拆分时间段':'调整相邻时段';
+  boundary={type,index,day,split,selection:{...detailSelection}};$('boundary-title').textContent=split?'拆分时间段':'调整相邻时段';
   $('boundary-context').textContent=(day?`仅修改周${'一二三四五六日'[day-1]}。`:'')+(split?`${times(row)} · ${row.title}`:`${row.title} → ${getRows(type)[pair[1]].title}，两段会共同调整，保持连续。`);
   $('boundary-time').value=split?clockText(Math.floor((minutes(row.start)+minutes(row.end))/2)):row.end;$('boundary-error').textContent='';$('boundary-dialog').showModal();
 }
 $('cancel-boundary').onclick=()=>$('boundary-dialog').close();
-$('boundary-form').onsubmit=event=>{event.preventDefault();try {applyBoundary(boundary.type,boundary.index,boundary.day,$('boundary-time').value,boundary.split);$('boundary-dialog').close();notice('已调整预览，请保存对应日程或周表。');}catch(error){$('boundary-error').textContent=error.message;}};
+$('boundary-form').onsubmit=event=>{event.preventDefault();try {if(boundary.selection.personaId!==detailSelection?.personaId||boundary.selection.date!==detailSelection?.date)throw new Error('人设或日期已变化，请关闭编辑后重试。');applyBoundary(boundary.type,boundary.index,boundary.day,$('boundary-time').value,boundary.split);$('boundary-dialog').close();notice('已调整预览，请保存对应日程或周表。');}catch(error){$('boundary-error').textContent=error.message;}};
 $('week-matrix').addEventListener('click',event=>{
   const day=event.target.closest('[data-week-day]');if(day){weekFilter=day.dataset.weekDay;renderWeekFilter();renderDetail();}
 });
 $('week-matrix').addEventListener('keydown',event=>{
-  const handle=event.target.closest('[data-drag-boundary]');if(!handle||generating)return;
+  const handle=event.target.closest('[data-drag-boundary]');if(!handle||controlsLocked()||!detailMatchesSelection())return;
   const index=Number(handle.dataset.dragBoundary),day=Number(handle.dataset.day);
   if(event.key==='Enter'||event.key===' '){event.preventDefault();openBoundary('week',index,day);return;}
   if(!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();
@@ -458,7 +508,7 @@ $('week-matrix').addEventListener('keydown',event=>{
   try {applyBoundary('week',index,day,clockText(value));const row=getRows('week').findIndex(r=>r.days.length===1&&r.days[0]===day&&r.end===clockText(value));$('week-matrix').querySelector(`[data-drag-boundary="${row>=0?row:index}"][data-day="${day}"]`)?.focus();}catch(error){notice(error.message,true);}
 });
 $('week-matrix').addEventListener('pointerdown',event=>{
-  const handle=event.target.closest('[data-drag-boundary]');if(!handle||generating||event.button!==0)return;
+  const handle=event.target.closest('[data-drag-boundary]');if(!handle||controlsLocked()||!detailMatchesSelection()||event.button!==0)return;
   event.preventDefault();handle.setPointerCapture(event.pointerId);
   const index=Number(handle.dataset.dragBoundary),day=Number(handle.dataset.day),track=handle.parentElement,rect=track.getBoundingClientRect(),pair=adjacentPair('week',index,day),rows=getRows('week');if(!pair)return;
   const initial=minutes(rows[index].end);let value=initial;handle.classList.add('dragging');
@@ -471,12 +521,19 @@ for (const [id,type] of [['add-day','day'],['add-week','week'],['add-event','eve
 function requirePersona() { if(!$('persona').value) throw new Error('请先选择人设。'); }
 async function save(kind,value) {
   requirePersona();
+  requireDetailReady();
   if(kind==='day'||kind==='profile'){const errors=coverageErrors(kind==='day'?value.slots || []:value.weekly || [],kind==='day'?'day':'week');if(errors.length)throw new Error('暂不能保存：'+errors.slice(0,3).join('；'));}
   const remaining = [...dirtyKinds].filter(k=>k!==kind), draft = structuredClone(detail);
-  await api('POST','save',{persona_id:$('persona').value,date:$('date').value,kind,value});
-  await loadDetail();
-  for(const pending of remaining) { detail[pending === 'profile' ? 'profile' : pending === 'calendar' ? 'calendar' : 'day'] = draft[pending]; markDirty(pending); }
-  if(remaining.length) renderDetail();
+  const target={...detailSelection};
+  saving=true;setGenerationBusy(generating);
+  try {
+    await api('POST','save',{persona_id:target.personaId,date:target.date,kind,value});
+    await loadDetail();
+    if(detailSelection?.personaId===target.personaId&&detailSelection?.date===target.date){
+      for(const pending of remaining) { detail[pending === 'profile' ? 'profile' : pending === 'calendar' ? 'calendar' : 'day'] = draft[pending]; markDirty(pending); }
+      if(remaining.length)renderDetail();
+    }
+  } finally {saving=false;recoverJob();setGenerationBusy(generating);}
   notice('已保存'+(kind==='profile'?'。旧活动与日程已失效，请生成当天。':kind==='calendar'?'。当天安排已失效，请重新生成。':'。')+(remaining.length?'其他页未保存的修改仍保留在预览中。':''));
 }
 $('save-day').onclick=()=>action(()=>save('day',detail.day || {slots:[]}));
@@ -488,6 +545,7 @@ $('save-profile').onclick=()=>action(async()=>{
 });
 async function generate(scope) {
   requirePersona();
+  requireDetailReady();
   if(scope==='diary') {
     if(!diary?.can_generate)throw new Error(diary?.reason || '请选择已结束且有日程的日期。');
     if((dirty || diary.entry)&&!await askConfirm('按这一天保存的日程重新写日记，成功后替换这一篇；未保存的日程修改会丢弃。继续？'))return;
@@ -506,15 +564,35 @@ function renderJob(result) {
   $('job-status').innerHTML=`<span>${escape(stages[result.stage] || result.stage || '正在生成')} · ${escape(result.message || '')}</span>${result.status==='running'?`<progress max="100" value="${progress}" aria-label="生成进度">${progress}%</progress>`:''}`;
 }
 function recoverJob() {
-  if(job)return;
+  if(job||detailLoading||saving)return;
   const running=state.jobs.find(j=>j.persona_id===$('persona').value&&j.status==='running');
-  if(running){job=running.id || running.job_id;if(!dirty&&running.date)$('date').value=running.date;setGenerationBusy(true);renderJob(running);clearTimeout(pollTimer);pollTimer=setTimeout(pollJob,300);}
+  if(running){job=running.id || running.job_id;if(!dirty&&running.date){$('date').value=running.date;followRoleToday=false;}setGenerationBusy(true);renderJob(running);clearTimeout(pollTimer);pollTimer=setTimeout(pollJob,300);}
+}
+function missingJob(error) {
+  return error?.code==='JOB_NOT_FOUND'||Number(error?.status)===404||/任务不存在[，,]?\s*可能插件已经重载/.test(error?.message || '');
 }
 async function pollJob() {
   if(!job)return;const ticket=job;
-  try { const result=await api('GET','job',{id:ticket});if(ticket!==job)return;renderJob(result);if(result.status==='running'){pollTimer=setTimeout(pollJob,1800);return;}
-    job=null;setGenerationBusy(false);notice(result.message || (result.status==='failed'?'生成失败':'已完成'),result.status==='failed');await loadDetail();await loadState();
-  } catch(error) {if(ticket!==job)return;$('job-status').textContent='连接中断，正在恢复任务查询…';pollTimer=setTimeout(pollJob,5000);$('last-updated').textContent=error.message || '任务查询暂时不可用';}
+  let result;
+  try {result=await api('GET','job',{id:ticket});}
+  catch(error) {
+    if(ticket!==job)return;
+    if(missingJob(error)){
+      job=null;clearTimeout(pollTimer);
+      state.jobs=state.jobs.filter(j=>(j.id || j.job_id)!==ticket);
+      setGenerationBusy(false);renderJob({status:'interrupted',stage:'interrupted',message:'任务记录已失效'});
+      notice('任务记录已失效，可能插件已重载或记录已清理。已解除操作锁定，请查看已保存日程后按需重新生成。',true);
+      try {await loadDetail();}catch(refreshError){notice('任务记录已失效，已解除操作锁定；详情刷新失败：'+(refreshError.message || '请手动刷新'),true);}
+      return;
+    }
+    $('job-status').textContent='连接中断，正在恢复任务查询…';pollTimer=setTimeout(pollJob,5000);$('last-updated').textContent=error.message || '任务查询暂时不可用';return;
+  }
+  if(ticket!==job)return;renderJob(result);
+  if(result.status==='running'){pollTimer=setTimeout(pollJob,1800);return;}
+  job=null;clearTimeout(pollTimer);
+  state.jobs=state.jobs.filter(j=>(j.id || j.job_id)!==ticket);
+  setGenerationBusy(false);notice(result.message || (result.status==='failed'?'生成失败':'已完成'),result.status==='failed');
+  try {await loadDetail();await loadState();}catch(error){notice('生成任务已结束；详情刷新失败：'+(error.message || '请手动刷新'),true);}
 }
 for (const [id,scope] of [['generate','day'],['generate-profile','profile'],['generate-calendar','calendar'],['generate-diary','diary']]) $(id).onclick=()=>action(()=>generate(scope));
 $('save-settings').onclick=()=>action(async()=>{
@@ -538,12 +616,12 @@ $('add-umo').onclick=()=>action(async()=>{const u=$('manual-umo').value.trim();i
 $('refresh').onclick=()=>action(async()=>{if((dirty||dirtySettings)&&!await askConfirm('刷新会放弃未保存的修改，继续？'))return;await loadState(true);await loadDetail();notice('已刷新。');});
 $('refresh-queues').onclick=()=>action(()=>loadState());
 let priorPersona='',priorDate='';
-async function chooseDate(value, openDay = false) {
-  if(generating) return;
+async function chooseDate(value, openDay = false, {followToday=false} = {}) {
+  if(controlsLocked()) return;
   if(value<'1970-01-01'||value>'2100-12-31') return;
   if(dirty&&!await askConfirm('切换会放弃未保存的修改，继续？')) return;
   $('date').value=value;
-  await loadDetail();priorPersona=$('persona').value;priorDate=value;
+  if(!await loadDetail())return;followRoleToday=followToday;priorPersona=$('persona').value;priorDate=$('date').value;
   if(openDay) switchTab('today');
 }
 $('date-strip').addEventListener('click',event=>{const button=event.target.closest('[data-date]');if(button) action(()=>chooseDate(button.dataset.date));});
@@ -554,19 +632,19 @@ $('rhythm-bar').addEventListener('click',event=>{
   row.classList.add('focused');row.focus({preventScroll:true});row.scrollIntoView({block:'center',behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});
 });
 $('month-grid').addEventListener('click',event=>{const button=event.target.closest('[data-calendar-date]');if(button) action(()=>chooseDate(button.dataset.calendarDate,true));});
-$('jump-today').onclick=()=>action(()=>chooseDate(localToday()));
+$('jump-today').onclick=()=>action(()=>chooseDate(localToday(),false,{followToday:true}));
 for(const [id,delta] of [['month-prev',-1],['month-next',1]]) $(id).onclick=()=>{const date=dateObject(calendarMonth+'-01');date.setUTCMonth(date.getUTCMonth()+delta);calendarMonth=isoDate(date).slice(0,7);renderMonth();};
 function renderWeekFilter() {document.querySelectorAll('[data-week-filter]').forEach(b=>{const active=b.dataset.weekFilter===weekFilter;b.classList.toggle('active',active);b.setAttribute('aria-pressed',active);});}
 $('week-filter').addEventListener('click',event=>{const button=event.target.closest('[data-week-filter]');if(!button)return;weekFilter=button.dataset.weekFilter;renderWeekFilter();renderDetail();});
-for (const id of ['persona','date']) $(id).onchange=()=>action(async()=>{if(dirty&&!await askConfirm('切换会放弃未保存的修改，继续？')){$('persona').value=priorPersona;$('date').value=priorDate;return;}await loadDetail();priorPersona=$('persona').value;priorDate=$('date').value;});
+for (const id of ['persona','date']) $(id).onchange=()=>action(async()=>{if(controlsLocked()){restoreDetailSelection();return;}if(dirty&&!await askConfirm('切换会放弃未保存的修改，继续？')){restoreDetailSelection();return;}if(!await loadDetail({followToday:id==='persona'&&followRoleToday}))return;if(id==='date')followRoleToday=false;priorPersona=$('persona').value;priorDate=$('date').value;});
 const liveTimer=setInterval(()=>{if(state&&!document.hidden)updateLiveStatus();},1000);
 const stateTimer=setInterval(()=>{if(state)refreshLive();},15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state)refreshLive();});
 window.addEventListener('beforeunload',event=>{if(dirty||dirtySettings){event.preventDefault();event.returnValue='';}});
 window.addEventListener('pagehide',()=>{clearTimeout(pollTimer);clearInterval(liveTimer);clearInterval(stateTimer);tabTransition.cancel();});
 async function init() {
-  $('date').value=new Intl.DateTimeFormat('en-CA',{year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  $('date').value=todayInTimezone();
   if(!bridge){notice('请从 AstrBot 管理面板 → 插件 → 角色日程 → 可视化视图打开本页面。',true);document.querySelectorAll('button').forEach(b=>b.disabled=true);return;}
-  await bridge.ready();await loadState(true);await loadDetail();priorPersona=$('persona').value;priorDate=$('date').value;
+  await bridge.ready();await loadState(true);await loadDetail({followToday:followRoleToday});priorPersona=$('persona').value;priorDate=$('date').value;
 }
 action(init);

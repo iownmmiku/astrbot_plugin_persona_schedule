@@ -437,6 +437,213 @@ class InteractionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.generator.transition_notice.assert_not_awaited()
         self.assertEqual(self.notice_status(), "included")
 
+    async def test_repeated_request_keeps_its_reserved_advance_goodbye(self):
+        await self.activate()
+        event, request = await self.message(inject=True)
+        first = request.extra_user_content_parts[-1].text
+        owner = request._persona_schedule_notice_reservation["owner"]
+        await self.plugin.inject_schedule(event, request)
+        self.assertEqual(len(request.extra_user_content_parts), 1)
+        self.assertEqual(request.extra_user_content_parts[0].text, first)
+        self.assertIn("upcoming_activity", request.extra_user_content_parts[0].text)
+        self.assertIn("临近这项安排", request.extra_user_content_parts[0].text)
+        self.assertEqual(request._persona_schedule_notice_reservation["owner"], owner)
+        self.assertEqual(len(self.plugin.dialogue[UMO]["notices"]), 1)
+        _, another = await self.message("又一条消息", inject=True)
+        self.assertNotIn("upcoming_activity", another.extra_user_content_parts[0].text)
+
+    async def test_disabled_request_releases_its_unconsumed_notice_claim(self):
+        await self.activate()
+        event, request = await self.message(inject=True)
+        other = object()
+        request.extra_user_content_parts.insert(0, other)
+        self.plugin.store.settings["enabled"] = False
+        await self.plugin.inject_schedule(event, request)
+        self.assertEqual(request.extra_user_content_parts, [other])
+        self.assertIsNone(request._persona_schedule_notice_reservation)
+        self.assertIsNone(request._persona_schedule_content_part)
+        self.assertIsNone(event.get_extra("astrbot_plugin_persona_schedule:checked_context"))
+        self.assertFalse(self.plugin.dialogue[UMO]["notices"])
+        self.plugin.store.settings["enabled"] = True
+        _, fresh = await self.message("继续聊", inject=True)
+        self.assertIn("upcoming_activity", fresh.extra_user_content_parts[-1].text)
+
+    async def test_command_request_clears_its_parts_and_notice_claim_without_stopping_command(self):
+        await self.activate()
+        event, request = await self.message(inject=True)
+        event.message_str = "/reset"
+        await self.plugin.inject_schedule(event, request)
+        self.assertEqual(request.extra_user_content_parts, [])
+        self.assertIsNone(request._persona_schedule_notice_reservation)
+        self.assertIsNone(request._persona_schedule_content_part)
+        self.assertFalse(self.plugin.dialogue[UMO]["notices"])
+        self.assertFalse(event.stopped)
+
+    async def test_future_plan_failure_retains_current_busy_policy_with_separate_backoff(self):
+        await self.activate()
+        self.clock("23:55")
+        self.plugin.dialogue[UMO]["last_inbound"] = Frozen.current.timestamp() - 60
+        self.plugin.generator.day = AsyncMock(side_effect=RuntimeError("PRIVATE_PROVIDER_ERROR"))
+        first, _ = await self.message("刚才还有件事没聊完")
+        self.clock("23:56")
+        second, _ = await self.message("再留一句话")
+        self.assertTrue(first.stopped)
+        self.assertTrue(second.stopped)
+        self.assertEqual(len(self.plugin.store.data["queues"][UMO]["messages"]), 2)
+        self.assertNotIn(UMO, self.plugin.failures)
+        retry_key = "future-plan:traveler:2026-10-15"
+        self.assertGreater(self.plugin.failures[retry_key], Frozen.current.timestamp())
+        self.plugin.generator.day.assert_awaited_once()
+        self.assertNotIn("PRIVATE_PROVIDER_ERROR", json.dumps(self.plugin.store.data["logs"]))
+
+    async def test_future_plan_failure_retains_current_slow_policy(self):
+        await self.activate()
+        self.clock("23:55")
+        self.plan["slots"][-1]["status"] = "slow"
+        self.plugin.dialogue[UMO]["last_inbound"] = Frozen.current.timestamp() - 60
+        self.plugin.generator.day = AsyncMock(side_effect=RuntimeError("offline"))
+        event, _ = await self.message()
+        self.assertTrue(event.stopped)
+        queue = self.plugin.store.data["queues"][UMO]
+        self.assertEqual(queue["messages"][0]["status"], "slow")
+        self.assertGreater(queue["due"], Frozen.current.timestamp())
+        self.assertNotIn(UMO, self.plugin.failures)
+
+    async def test_changed_identity_at_final_lookup_cancels_old_request(self):
+        original = self.plugin.environment
+        for change in ("persona", "conversation"):
+            with self.subTest(change=change):
+                calls = 0
+                async def switched(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    env = copy.deepcopy(await original(*args, **kwargs))
+                    if calls == 2:
+                        if change == "persona":
+                            env["persona"] = {"id": "uncached-persona", "key": "new-key", "prompt": "新人设"}
+                        else:
+                            env["cid"] = "new-conversation"
+                    return env
+                self.plugin.environment = switched
+                event = FakeEvent("原消息")
+                other = object()
+                request = types.SimpleNamespace(system_prompt="固定人设", prompt="用户原文", contexts=[],
+                    conversation=None, extra_user_content_parts=[other])
+                await self.plugin.inject_schedule(event, request)
+                self.assertTrue(event.stopped)
+                self.assertEqual(request.extra_user_content_parts, [other])
+                self.assertIsNone(request._persona_schedule_notice_reservation)
+                self.assertIsNone(event.get_extra("astrbot_plugin_persona_schedule:checked_context"))
+                self.assertFalse(self.plugin.store.data["queues"])
+        self.plugin.environment = original
+
+    async def test_final_lookup_uses_latest_busy_or_slow_plan_and_queues_once(self):
+        original = self.plugin.environment
+        for status in ("busy", "slow"):
+            with self.subTest(status=status):
+                self.set_plan()
+                self.plugin.store.data["queues"].clear()
+                calls = 0
+                async def edited(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    env = await original(*args, **kwargs)
+                    if calls == 2:
+                        self.plan["slots"][0].update(status=status, title="刚刚保存的安排")
+                    return env
+                self.plugin.environment = edited
+                event = FakeEvent("只保存这条消息一次")
+                request = types.SimpleNamespace(system_prompt="不改系统", conversation=None)
+                await self.plugin.inject_schedule(event, request)
+                self.assertTrue(event.stopped)
+                self.assertFalse(getattr(request, "extra_user_content_parts", []))
+                rows = self.plugin.store.data["queues"][UMO]["messages"]
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["status"], status)
+                self.assertEqual(rows[0]["activity"], "刚刚保存的安排")
+                await self.plugin.inject_schedule(event, request)
+                self.assertEqual(len(self.plugin.store.data["queues"][UMO]["messages"]), 1)
+        self.plugin.environment = original
+
+    async def test_final_lookup_uses_latest_free_activity(self):
+        original = self.plugin.environment
+        calls = 0
+        async def edited(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            env = await original(*args, **kwargs)
+            if calls == 2:
+                self.plan["slots"][0]["title"] = "刚保存的花园散步"
+            return env
+        self.plugin.environment = edited
+        event = FakeEvent()
+        request = types.SimpleNamespace(system_prompt="不改系统", conversation=None)
+        await self.plugin.inject_schedule(event, request)
+        self.assertFalse(event.stopped)
+        self.assertIn("刚保存的花园散步", request.extra_user_content_parts[0].text)
+        self.assertNotIn("自由聊天", request.extra_user_content_parts[0].text)
+
+    async def test_final_lookup_does_not_pass_request_when_cached_plan_is_removed(self):
+        original = self.plugin.environment
+        calls = 0
+        async def invalidated(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            env = await original(*args, **kwargs)
+            if calls == 2:
+                self.record["days"].clear()
+            return env
+        self.plugin.environment = invalidated
+        event = FakeEvent("原计划已在另一处失效")
+        other = object()
+        request = types.SimpleNamespace(system_prompt="固定人设", conversation=None,
+            extra_user_content_parts=[other])
+        await self.plugin.inject_schedule(event, request)
+        self.assertTrue(event.stopped)
+        self.assertEqual(request.extra_user_content_parts, [other])
+        self.assertIsNone(request._persona_schedule_notice_reservation)
+        self.assertFalse(self.plugin.store.data["queues"])
+
+    async def test_final_lookup_joins_new_backlog_instead_of_overtaking_it(self):
+        original = self.plugin.environment
+        calls = 0
+        async def queued(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            env = await original(*args, **kwargs)
+            if calls == 2:
+                self.plugin.store.enqueue(UMO, env["cid"], self.persona["key"], "用户", "较早留言",
+                    Frozen.current.timestamp(), Frozen.current.timestamp() + 60, "slow")
+            return env
+        self.plugin.environment = queued
+        event = FakeEvent("随后留言")
+        request = types.SimpleNamespace(system_prompt="固定人设", conversation=None)
+        await self.plugin.inject_schedule(event, request)
+        self.assertTrue(event.stopped)
+        self.assertFalse(getattr(request, "extra_user_content_parts", []))
+        self.assertEqual([row["text"] for row in self.plugin.store.data["queues"][UMO]["messages"]],
+            ["较早留言", "随后留言"])
+
+    async def test_identity_change_releases_old_request_notice_claim(self):
+        await self.activate()
+        event, request = await self.message(inject=True)
+        self.assertTrue(request._persona_schedule_notice_reservation["tokens"])
+        original = self.plugin.environment
+        calls = 0
+        async def switched(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            env = copy.deepcopy(await original(*args, **kwargs))
+            if calls == 2:
+                env["cid"] = "different-conversation"
+            return env
+        self.plugin.environment = switched
+        await self.plugin.inject_schedule(event, request)
+        self.assertTrue(event.stopped)
+        self.assertEqual(request.extra_user_content_parts, [])
+        self.assertIsNone(request._persona_schedule_notice_reservation)
+        self.assertFalse(self.plugin.dialogue[UMO]["notices"])
+
     async def cancellation(self, mutate):
         await self.activate()
         async def phrase(*args, **kwargs):

@@ -8,7 +8,7 @@
 
 版本变化见 [更新日志](CHANGELOG.md)。
 
-开发状态与验收条件见 [开发计划表](docs/ROADMAP.md)。**v0.3.7 源码更新已实现突发情况及六项优化，GitHub Release 另行发布。**
+开发状态与验收条件见 [开发计划表](docs/ROADMAP.md)。**v0.3.7 已实现突发情况及六项优化，安装包与发行说明见 [GitHub Release](https://github.com/iownmmiku/astrbot_plugin_persona_schedule/releases/tag/v0.3.7)。**
 
 ## 回复行为
 

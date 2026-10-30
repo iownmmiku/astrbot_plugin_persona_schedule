@@ -7,6 +7,7 @@ import json
 import random
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -25,6 +26,9 @@ from .interaction import InteractionMixin
 from .recurrence import apply_recurrences, expand_rules, validate_rules
 from .diary_context import add_material, bind_initial_material, chat_enabled, material_summary, prune_materials, select_materials
 from .workbench import WorkbenchMixin, _record_for_edit
+from .maintenance import MaintenanceMixin, EditConflict
+from .incidents import IncidentMixin
+from .model_runtime import BudgetExceeded
 
 NAME = "astrbot_plugin_persona_schedule"
 
@@ -33,13 +37,15 @@ async def maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.6")
-class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.7")
+class PersonaSchedule(MaintenanceMixin, IncidentMixin, WorkbenchMixin, InteractionMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context, self.config = context, config
         self.store = Store(StarTools.get_data_dir(NAME))
         self.store.data["settings"] = validate_settings({k: v for k, v in config.items() if k in DEFAULTS}, self.store.settings)
+        if self.store.data.get("recovery_info", {}).get("requires_review"):
+            self.store.settings["enabled"] = False
         prune_materials(self.store, time.time())
         self.store.save()
         self.generator = Generator(context, self.store)
@@ -68,11 +74,15 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 health.update(status="uncertain", verified=False, error="上次发送期间进程退出，请核对平台")
             elif health.get("status") == "generating":
                 health.update(status="deferred", verified=False, error="上次回复生成已中断，等待重新检查日程")
-        self.generation_slots = asyncio.Semaphore(3)
+        # Provider calls share the purpose-aware limiter in Generator.runtime.
+        # This optional outer gate also supports isolated cancellation tests.
+        self.generation_slots = nullcontext()
         self.failures = {}
         self.closing = False
         self.worker = None
         self.last_tick, self.worker_error = 0, ""
+        self.import_previews = {}
+        self.init_incidents()
         self.store.save()
         self._migrate_queued_commands()
         self._register_web()
@@ -201,6 +211,34 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             if progress:
                 progress(name, percent, message)
         stage("waiting", 5, "等待角色档案生成锁")
+        with self.generator.task_scope("schedule", background=automatic):
+            return await self._ensure_plan(persona, umo, day, force=force, progress=progress, automatic=automatic)
+
+    async def _ensure_plan(self, persona, umo="", day="", *, force="", progress=None, automatic=False):
+        def inactive():
+            return automatic and not (self.store.settings["enabled"] and self.store.settings["auto_schedule_enabled"])
+        def stage(name, percent, message):
+            if progress:
+                progress(name, percent, message)
+        if not force:
+            if inactive():
+                return None
+            await self._require_current_persona(persona)
+            if inactive():
+                return None
+            # Complete plans are immutable while a background rebuild waits on
+            # the model. Chats can use that saved snapshot without waiting for
+            # tomorrow's optional generation to release the persona write lock.
+            cached = self.store.data["personas"].get(persona["id"], {})
+            profile = cached.get("profile")
+            if cached.get("key") == persona["key"] and profile:
+                requested_day = day or datetime.now(ZoneInfo(profile["timezone"])).date().isoformat()
+                year = str(date.fromisoformat(requested_day).year)
+                calendar = cached.get("calendars", {}).get(year)
+                schedule = cached.get("days", {}).get(requested_day)
+                if (calendar is not None and schedule is not None
+                        and apply_recurrences(calendar, cached.get("recurrences", []), int(year)) == calendar):
+                    return profile, calendar, self.effective_schedule(persona, schedule)
         async with self._lock(self.persona_locks, persona["id"]):
             if inactive():
                 return None
@@ -208,6 +246,13 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             records = self.store.data["personas"]
             previous = records.get(persona["id"])
             fingerprint = digest(previous)
+            async def check_generation():
+                await self._require_current_persona(persona)
+                if inactive():
+                    raise ValueError("日程自动生成已关闭，已取消本次模型调用")
+                if digest(records.get(persona["id"])) != fingerprint:
+                    raise ValueError("生成期间日程已变化，已取消旧模型调用，请重试")
+
             original = previous if previous and previous.get("key") == persona["key"] else {}
             record = _record_for_edit(records, persona)
             record.setdefault("locked_days", {})
@@ -220,7 +265,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 async with self.generation_slots:
                     if inactive():
                         return None
-                    record["profile"] = await self.generator.profile(persona, umo)
+                    record["profile"] = await self.generator.profile(persona, umo, before_generate=check_generation)
                 old_weekly = (original.get("profile") or {}).get("weekly", [])
                 record["profile"]["weekly"] = merge_locked_slots(record["profile"]["weekly"], old_weekly, weekly=True)
                 changed = True
@@ -237,7 +282,8 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 async with self.generation_slots:
                     if inactive():
                         return None
-                    record["calendars"][year] = await self.generator.calendar(persona, profile, int(year), umo)
+                    record["calendars"][year] = await self.generator.calendar(persona, profile, int(year), umo,
+                                                                           before_generate=check_generation)
                 changed = True
                 # A preview must not evict the current calendar or hand edits.
                 # Legacy saves may only identify manual ownership by revision
@@ -271,7 +317,8 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 async with self.generation_slots:
                     if inactive():
                         return None
-                    record["days"][day] = await self.generator.day(persona, profile, record["calendars"][year], day, recent, umo)
+                    record["days"][day] = await self.generator.day(persona, profile, record["calendars"][year], day, recent, umo,
+                                                                 before_generate=check_generation)
                 record["days"][day]["revision"] = original.get("days", {}).get(day, {}).get("revision", 0) + 1
                 # A date-specific lock takes precedence over the weekly lock.
                 base = merge_locked_slots(weekly_for_day(profile, day), record["locked_days"].get(day, []))
@@ -298,6 +345,13 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 # Commit all generated pieces together. A failed rebuild leaves
                 # previously edited profiles/calendars/schedules intact.
                 stage("saving", 95, "校验并保存完整日程")
+                previous_incidents = copy.deepcopy(self.store.data.get("incidents", {}))
+                previous_adjustments = copy.deepcopy(self.adjustments)
+                if force:
+                    self._cancel_persona_incidents(persona, "日程已重新生成", persist=False)
+                    for origin, adjustment in list(self.adjustments.items()):
+                        if adjustment.get("persona_key") == persona["key"]:
+                            self.adjustments.pop(origin)
                 records[persona["id"]] = record
                 try:
                     self.store.save()
@@ -306,11 +360,21 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                         records.pop(persona["id"], None)
                     else:
                         records[persona["id"]] = previous
+                    self.store.data["incidents"] = previous_incidents
+                    self.adjustments.clear()
+                    self.adjustments.update(previous_adjustments)
                     raise
             else:
                 # Retain the stored object identity used by final delivery checks.
                 record = previous
-            return record["profile"], record["calendars"][year], record["days"][day]
+            return record["profile"], record["calendars"][year], self.effective_schedule(persona, record["days"][day])
+
+    def _cached_schedule(self, persona, day, now=None):
+        record = self.store.data["personas"].get(persona["id"], {})
+        if record.get("key") != persona["key"]:
+            return None
+        base = record.get("days", {}).get(day)
+        return self.effective_schedule(persona, base, now) if base else None
 
     def _schedule_plans(self, now):
         settings = self.store.settings
@@ -361,7 +425,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 return unavailable
             profile = record["profile"]
             day = datetime.now(ZoneInfo(profile["timezone"])).date().isoformat()
-            schedule = record["days"].get(day)
+            schedule = self._cached_schedule(env["persona"], day)
             if not schedule:
                 return unavailable
             current = await self.environment(umo, session.get("platform", ""))
@@ -376,7 +440,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 return unavailable
             profile = record["profile"]
             now = datetime.now(ZoneInfo(profile["timezone"]))
-            schedule = record["days"].get(now.date().isoformat())
+            schedule = self._cached_schedule(env["persona"], now.date().isoformat(), now)
             if not schedule:
                 return unavailable
             if schedule["date"] != now.date().isoformat():
@@ -405,7 +469,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         record = self.store.data["personas"].get(persona["id"], {})
         if record.get("key") != persona["key"]:
             raise ValueError("人设已变化，请先生成新日程；历史日记仍可查看")
-        profile, schedule = record.get("profile"), record.get("days", {}).get(day)
+        profile, schedule = record.get("profile"), self._cached_schedule(persona, day)
         if not profile or not schedule:
             archived = self.store.data["diaries"].get(persona["id"], {}).get(day, {})
             if archived.get("persona_key") == persona["key"]:
@@ -415,11 +479,18 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             raise ValueError("这一天没有已保存的日程，不能凭空补写日记")
         profile = {k: v for k, v in profile.items() if k != "weekly"}
         schedule = copy.deepcopy(schedule)
-        adjustments = [adjustment_summary(r) for r in self.store.data["adaptation_log"]
-                       if r.get("persona_id") == persona["id"] and r.get("date") == day
-                       and r.get("persona_key") == persona["key"]]
+        archived = self.store.data["diaries"].get(persona["id"], {}).get(day, {})
+        past = (archived.get("source", {}).get("schedule", {}).get("contact_adjustments", [])
+                if archived.get("persona_key") == persona["key"] else [])
+        # The runtime log rotates globally. Already archived, anonymous facts
+        # must not disappear or mark a diary stale just because that log aged out.
+        adjustments = {digest(item): item for item in past}
+        for row in self.store.data["adaptation_log"]:
+            if row.get("persona_id") == persona["id"] and row.get("date") == day and row.get("persona_key") == persona["key"]:
+                item = adjustment_summary(row)
+                adjustments[digest(item)] = item
         if adjustments:
-            schedule["contact_adjustments"] = adjustments[-20:]
+            schedule["contact_adjustments"] = list(adjustments.values())[-20:]
         tz = schedule.get("timezone") or profile["timezone"]
         return copy.deepcopy({"profile": profile, "schedule": schedule,
                               "chat_context": select_materials(self.store, persona, day, tz)})
@@ -433,6 +504,10 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         return source, tz
 
     async def ensure_diary(self, persona, day, umo="", *, force=False, automatic=False, progress=None):
+        with self.generator.task_scope("diary", background=automatic):
+            return await self._ensure_diary(persona, day, umo, force=force, automatic=automatic, progress=progress)
+
+    async def _ensure_diary(self, persona, day, umo="", *, force=False, automatic=False, progress=None):
         # A separate lock avoids duplicate automatic/manual writes. Snapshot and
         # commit hold the persona lock briefly; a diary never blocks chat LLMs.
         async with self._lock(self.diary_locks, persona["id"]):
@@ -478,6 +553,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 entry = {**value, "date": day, "timezone": tz, "persona_key": persona["key"],
                          "created_at": previous["created_at"] if previous else now, "updated_at": now,
                          "revision": previous.get("revision", 0) + 1 if previous else 1, "source": archived_source}
+                entry["source_tracking"] = self._diary_tracking(persona, day, source)
                 saved_entries, saved_logs = dict(entries), list(self.store.data["logs"])
                 try:
                     entries[day] = entry
@@ -506,7 +582,9 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             for d, schedule in sorted(record["days"].items(), reverse=True):
                 tz = schedule.get("timezone") or record["profile"]["timezone"]
                 today = datetime.fromtimestamp(now, ZoneInfo(tz)).date()
+                ended_at = datetime.combine(date.fromisoformat(d) + timedelta(days=1), datetime.min.time(), ZoneInfo(tz)).timestamp()
                 if ((today - timedelta(days=7)).isoformat() <= d < today.isoformat()
+                        and now >= ended_at + self.store.settings["diary_archive_delay_minutes"] * 60
                         and d not in entries and self.failures.get(f"diary:{pid}:{d}", 0) <= now):
                     pending.append(d)
             if pending:
@@ -544,7 +622,12 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         if self.failures.get(key, 0) < now:
             self.failures[key] = now + 300
             operation = "日记归档" if key.startswith("diary:") else "主动日程生成" if key.startswith("plan:") else "日程处理"
-            message = f"{operation}失败（{type(exc).__name__}），5 分钟后重试；请检查模型和配置"
+            if isinstance(exc, BudgetExceeded):
+                local = datetime.fromtimestamp(now, ZoneInfo(self.store.settings["timezone"]))
+                self.failures[key] = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+                message = f"{operation}已跳过：今日后台模型预算已用完，保留现有安排，次日再检查"
+            else:
+                message = f"{operation}失败（{type(exc).__name__}），5 分钟后重试；请检查模型和配置"
             self.store.log(message)
             logger.warning("[角色日程] %s", message)
 
@@ -576,7 +659,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 return None
             profile = record.get("profile") or profile
             now = datetime.now(ZoneInfo(profile["timezone"]))
-            schedule = record.get("days", {}).get(now.date().isoformat())
+            schedule = self._cached_schedule(env["persona"], now.date().isoformat(), now)
             if schedule is None:
                 return None
             slot, end = slot_at(schedule, now)
@@ -717,7 +800,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             event.stop_event()
             return
         now = datetime.now(ZoneInfo(profile["timezone"]))
-        schedule = record.get("days", {}).get(now.date().isoformat())
+        schedule = self._cached_schedule(env["persona"], now.date().isoformat(), now)
         if schedule is None:
             clear_request()
             event.stop_event()
@@ -758,6 +841,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             self.store.save()
         if self.store.prune_expired(now):
             self.store.log("已逐条清理超过保留期限的留言，保留期限内的新留言")
+        self._schedule_incidents(now)
         if not self.store.settings["enabled"]:
             return
         self._schedule_plans(now)
@@ -795,7 +879,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                     profile = record.get("profile")
                     if profile and record.get("key") == env["persona"]["key"]:
                         day = datetime.now(ZoneInfo(profile["timezone"])).date().isoformat()
-                        schedule = record.get("days", {}).get(day)
+                        schedule = self._cached_schedule(env["persona"], day)
                         if schedule:
                             await self._maybe_transition_notice(env, profile, schedule)
                     return
@@ -860,7 +944,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             self._send_health(umo, "deferred")
             return
         now = datetime.now(ZoneInfo(current_profile["timezone"]))
-        current_schedule = record["days"].get(now.date().isoformat())
+        current_schedule = self._cached_schedule(current["persona"], now.date().isoformat(), now)
         if current_schedule is None:
             self._send_health(umo, "deferred")
             return
@@ -872,7 +956,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             self.store.save()
             return
         # Edits or a boundary crossing can invalidate the reply's context.
-        if current_schedule is not schedule or current_slot != slot or queue["due"] > time.time():
+        if digest(current_schedule) != digest(schedule) or current_slot != slot or queue["due"] > time.time():
             self._send_health(umo, "deferred")
             return
         queue["delivery"] = "sending"
@@ -974,7 +1058,11 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                   "diagnostics": ("GET", self.web_diagnostics), "diary": ("GET", self.web_diary),
                   "preview": ("POST", self.web_preview), "history": ("GET", self.web_history),
                   "restore": ("POST", self.web_restore), "recurrences": ("GET", self.web_recurrences),
-                  "recurrences-save": ("POST", self.web_save_recurrences)}
+                  "recurrences-save": ("POST", self.web_save_recurrences),
+                  "incidents": ("GET", self.web_incidents), "incident-end": ("POST", self.web_incident_end),
+                  "backups": ("GET", self.web_backups), "backup-create": ("POST", self.web_backup_create),
+                  "export": ("GET", self.web_export), "import-preview": ("POST", self.web_import_preview),
+                  "import-apply": ("POST", self.web_import_apply)}
         for path, (method, handler) in routes.items():
             self.context.register_web_api(f"/{NAME}/{path}", self._web_handler(handler, method), [method], "角色日程 · " + path)
         self.web_available = True
@@ -992,6 +1080,8 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 if not isinstance(payload, dict):
                     raise ValueError("请求应为 JSON 对象")
                 return json_response(await handler(payload))
+            except EditConflict as exc:
+                return error_response(str(exc), status_code=409)
             except (ValueError, KeyError, TypeError) as exc:
                 # These validators only contain local diagnostic text.
                 return error_response(str(exc)[:500], status_code=400)
@@ -1045,7 +1135,8 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         if not profile:
             return result
         now = datetime.now(ZoneInfo(profile["timezone"]))
-        schedule = record["days"].get(now.date().isoformat())
+        persona = {"id": persona_id, "key": record.get("key")}
+        schedule = self._cached_schedule(persona, now.date().isoformat(), now)
         if not schedule:
             return result
         slot, _ = slot_at(schedule, now)
@@ -1059,7 +1150,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         # a future weekly template is the actual, possibly holiday-specific day.
         for offset in range(46):
             day = now.date() + timedelta(days=offset)
-            cached = record["days"].get(day.isoformat())
+            cached = self._cached_schedule(persona, day.isoformat(), now)
             if not cached:
                 break
             for row in cached["slots"]:
@@ -1104,6 +1195,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             rows.append(row)
         settings = self.store.settings
         return {"worker": self._worker_status(), "web_available": self.web_available,
+                "model_runtime": self.generator.runtime.snapshot(), "storage_metrics": self.store.storage_metrics(),
                 "models": {key: settings[key] or (settings["schedule_provider_id"] if key == "diary_provider_id" else "") or settings["provider_id"]
                            for key in ("schedule_provider_id", "reply_provider_id", "diary_provider_id")},
                 "sessions": rows, "truncated": len(sessions) > 50, "checked_at": time.time(),
@@ -1134,6 +1226,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                    "send_status": self.health.get(u, {}).get("status", "unverified"),
                    "delivery": q["delivery"], "reason": q["reason"]} for u, q in self.store.data["queues"].items()]
         return {"settings": settings, "personas": options, "sessions": list(sessions.values()),
+                "model_runtime": self.generator.runtime.snapshot(), "storage_metrics": self.store.storage_metrics(),
                 "adaptation_log": [{k: v for k, v in row.items() if k not in {"persona_key", "source_slot"}}
                                    for row in self.store.data["adaptation_log"][-60:]],
                 "providers": await self._providers(), "queues": queues, "logs": self.store.data["logs"][-30:],
@@ -1156,9 +1249,14 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             self.config.update(previous)
             raise
         self.store.data["settings"] = settings
+        if payload.get("enabled") is True and self.store.data.get("recovery_info"):
+            self.store.data["recovery_info"]["requires_review"] = False
         prune_materials(self.store, time.time())
         if not settings["adaptive_enabled"]:
             self.adjustments.clear()
+        if not settings["enabled"] or not settings["incident_enabled"]:
+            for pid, record in self.store.data["personas"].items():
+                self._cancel_persona_incidents({"id": pid, "key": record["key"]}, "突发功能已关闭", persist=False)
         self.store.save()
         self.failures.clear()
         self.store.log("已保存插件设置")
@@ -1170,7 +1268,8 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         year = self._year(day)
         record = _record_for_edit(self.store.data["personas"], persona)
         return {"persona_id": persona["id"], "profile": record["profile"],
-                "calendar": record["calendars"].get(str(year)), "day": record["days"].get(day)}
+                "calendar": record["calendars"].get(str(year)), "day": self._cached_schedule(persona, day),
+                "base_day": record["days"].get(day), "edit_token": self._edit_token(persona)}
 
     async def web_diary(self, payload):
         persona = await self._persona(str(payload.get("persona_id", "")))
@@ -1198,6 +1297,8 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 if record.get("key") == persona["key"]:
                     material_tz = record.get("days", {}).get(day, {}).get("timezone") or tz
         return {"persona_id": persona["id"], "date": day, "today": today, "timezone": tz,
+                **self._diary_change_flags(persona, day, entries.get(day)),
+                "archive_delay_minutes": self.store.settings["diary_archive_delay_minutes"],
                 "automatic": self.store.settings["enabled"] and self.store.settings["diary_enabled"],
                 "chat_material": material_summary(select_materials(self.store, persona, day, material_tz)),
                 "chat_whitelist_count": len(self.store.settings["whitelist"]),
@@ -1275,6 +1376,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         kind = payload.get("kind")
         async with self._lock(self.persona_locks, persona["id"]):
             await self._require_current_persona(persona)
+            self._require_edit_token(persona, payload)
             record = _record_for_edit(self.store.data["personas"], persona)
             original = copy.deepcopy(record)
             if kind == "profile":
@@ -1318,7 +1420,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
                 raise ValueError("保存类型无效")
             snapshot_id = self._commit_edit(persona, original, record, kind, str(payload.get("date", "")))
         self.failures.clear()
-        return {"saved": True, "snapshot_id": snapshot_id}
+        return {"saved": True, "snapshot_id": snapshot_id, "edit_token": self._edit_token(persona)}
 
     async def web_recurrences(self, payload):
         persona = await self._persona(str(payload.get("persona_id", "")))
@@ -1338,6 +1440,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             year = datetime.now(ZoneInfo(tz)).year
         rules = copy.deepcopy(record.get("recurrences", []))
         return {"persona_id": persona["id"], "rules": rules, "year": year,
+                "edit_token": self._edit_token(persona),
                 "events": expand_rules(rules, year), "calendar_systems": ["gregorian", "fictional"]}
 
     async def web_save_recurrences(self, payload):
@@ -1345,9 +1448,10 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
         rules = validate_rules(payload.get("rules"))
         async with self._lock(self.persona_locks, persona["id"]):
             await self._require_current_persona(persona)
+            self._require_edit_token(persona, payload)
             previous = _record_for_edit(self.store.data["personas"], persona)
             if previous.get("recurrences", []) == rules:
-                return {"saved": True, "count": len(rules)}
+                return {"saved": True, "count": len(rules), "edit_token": self._edit_token(persona)}
             record = copy.deepcopy(previous)
             old_rules = record.get("recurrences", [])
             record["recurrences"] = rules
@@ -1375,7 +1479,7 @@ class PersonaSchedule(WorkbenchMixin, InteractionMixin, Star):
             # one. Never allow an old exception to survive a changed rule set.
             snapshot_id = self._commit_edit(persona, previous, record, "recurrences", clear_adjustments=True)
         self.failures.clear()
-        return {"saved": True, "count": len(rules), "snapshot_id": snapshot_id}
+        return {"saved": True, "count": len(rules), "snapshot_id": snapshot_id, "edit_token": self._edit_token(persona)}
 
     async def web_queue(self, payload):
         umo, action = str(payload.get("umo", "")), payload.get("action")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -27,6 +28,13 @@ DEFAULTS = {
     "diary_enabled": True,
     "diary_chat_enabled": True,
     "diary_limit": 180,
+    "diary_archive_delay_minutes": 5,
+    "incident_enabled": False,
+    "incident_probability": 0.2,
+    "daily_background_call_limit": 0,
+    "backup_enabled": True,
+    "backup_limit": 5,
+    "backup_interval_minutes": 60,
     "auto_schedule_enabled": True,
     "auto_schedule_time": "00:00",
     "auto_schedule_personas": [],
@@ -269,13 +277,19 @@ def validate_settings(payload, previous):
         raise ValueError("设置必须为对象")
     result = copy.deepcopy(previous)
     for key in ("enabled", "whitelist_enabled", "all_chats_enabled", "search_enabled", "diary_enabled", "diary_chat_enabled",
-                "auto_schedule_enabled", "canvas_integration_enabled", "adaptive_enabled", "transition_notice_enabled"):
+                "auto_schedule_enabled", "canvas_integration_enabled", "adaptive_enabled", "transition_notice_enabled",
+                "incident_enabled", "backup_enabled"):
         if key in payload:
             result[key] = boolean(payload[key])
     for key in ("provider_id", "schedule_provider_id", "reply_provider_id", "diary_provider_id", "timezone", "tavily_api_key"):
         if key in payload:
             result[key] = text(payload[key], 500)
     ZoneInfo(result["timezone"])
+    if "incident_probability" in payload:
+        value = payload["incident_probability"]
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError("突发概率应为 0～1 的有限数值")
+        result["incident_probability"] = float(value)
     if "auto_schedule_time" in payload:
         minute(payload["auto_schedule_time"])
         result["auto_schedule_time"] = payload["auto_schedule_time"]
@@ -293,7 +307,9 @@ def validate_settings(payload, previous):
               "tick_seconds": (5, 60), "timeout_seconds": (10, 300),
               "queue_limit": (5, 200), "queue_expire_hours": (1, 168), "diary_limit": (7, 1095),
               "transition_notice_minutes": (1, 60), "adaptive_max_delay_minutes": (1, 120),
-              "adaptive_review_interval_seconds": (30, 1800), "active_conversation_minutes": (1, 60)}
+              "adaptive_review_interval_seconds": (30, 1800), "active_conversation_minutes": (1, 60),
+              "diary_archive_delay_minutes": (0, 120), "daily_background_call_limit": (0, 10000),
+              "backup_limit": (1, 20), "backup_interval_minutes": (5, 1440)}
     for key, (low, high) in bounds.items():
         if key in payload:
             value = payload[key]
@@ -312,13 +328,33 @@ class Store:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "state.json"
+        self._save_metrics = {"save_count": 0, "failed_count": 0, "last_ms": 0.0,
+                              "max_ms": 0.0, "bytes": 0, "backup_error": ""}
+        self._save_samples = []
+        self._last_backup_at = None
         self.data = {"settings": copy.deepcopy(DEFAULTS), "personas": {}, "sessions": {}, "queues": {}, "logs": [],
                      "expired_messages": 0, "diaries": {}}
         if self.path.exists():
-            # Do not overwrite a damaged file with empty data.
-            loaded = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(loaded, dict):
-                raise ValueError("角色日程数据格式损坏，请恢复 state.json 备份")
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                from .backups import _validate_state
+                _validate_state({**self.data, **loaded})
+                validate_settings(loaded.get("settings", {}), DEFAULTS)
+            except (ValueError, TypeError, KeyError):
+                # Recover only a verified local backup, keeping the damaged file
+                # for inspection. If recovery fails, the original stays intact.
+                from .backups import recover_latest
+                loaded = recover_latest(self)
+                preserved = self.root / ("state.corrupt-" + uuid.uuid4().hex + ".json")
+                self.path.replace(preserved)
+                loaded["recovery_info"]["preserved_file"] = preserved.name
+            self.data.update(loaded)
+            self.data["settings"] = validate_settings(loaded.get("settings", {}), DEFAULTS)
+        elif (self.root / "backups").exists() and any((self.root / "backups").glob("backup-*.json")):
+            # A missing main file with existing backup history is a recovery,
+            # not a fresh install. Never replace that history with empty state.
+            from .backups import recover_latest
+            loaded = recover_latest(self)
             self.data.update(loaded)
             self.data["settings"] = validate_settings(loaded.get("settings", {}), DEFAULTS)
         for queue in self.data["queues"].values():
@@ -333,9 +369,38 @@ class Store:
         return self.data["settings"]
 
     def save(self):
+        import time
+        started = time.perf_counter()
         temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(self.path)
+        try:
+            # Compact JSON avoids formatting the entire archive on every small
+            # queue/material update; the file stays standard UTF-8 JSON.
+            content = json.dumps(self.data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            temp.write_bytes(content)
+            temp.replace(self.path)
+        except Exception:
+            self._save_metrics["failed_count"] += 1
+            raise
+        finally:
+            elapsed = (time.perf_counter() - started) * 1000
+            self._save_metrics["last_ms"] = elapsed
+            self._save_metrics["max_ms"] = max(elapsed, self._save_metrics["max_ms"])
+            self._save_samples = [*self._save_samples[-199:], elapsed]
+        self._save_metrics["save_count"] += 1
+        self._save_metrics["bytes"] = len(content)
+        # Backup failure cannot roll back a state file already atomically saved.
+        try:
+            from .backups import maybe_backup
+            maybe_backup(self)
+            self._save_metrics["backup_error"] = ""
+        except Exception as exc:
+            self._save_metrics["backup_error"] = type(exc).__name__
+
+    def storage_metrics(self):
+        samples = sorted(self._save_samples)
+        percentile = lambda fraction: samples[min(len(samples) - 1, int((len(samples) - 1) * fraction))] if samples else 0.0
+        return {**self._save_metrics, "p50_ms": percentile(.5), "p95_ms": percentile(.95),
+                "sample_count": len(samples), "recovery": copy.deepcopy(self.data.get("recovery_info"))}
 
     def log(self, message):
         self.data["logs"].append({"at": datetime.now(timezone.utc).isoformat(), "message": message})

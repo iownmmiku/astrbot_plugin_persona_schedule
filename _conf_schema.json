@@ -176,5 +176,47 @@
     "type": "int",
     "default": 10,
     "hint": "1～60 分钟。用于识别持续聊天及主动提前告知；忙碌时新消息仍可评估是否紧急，不会自动算作持续聊天。"
+  },
+  "incident_enabled": {
+    "description": "启用突发情况",
+    "type": "bool",
+    "default": false,
+    "hint": "按人设当地日期每日一次抽签，改变未锁定的可调整时段。"
+  },
+  "incident_probability": {
+    "description": "每天突发情况的抽中概率",
+    "type": "float",
+    "default": 0.2,
+    "hint": "0～1；0.2 为 20%。已抽签后修改从下一个当地日期生效。"
+  },
+  "daily_background_call_limit": {
+    "description": "每日后台模型调用上限",
+    "type": "int",
+    "default": 0,
+    "hint": "0 为不限。限制自动日程、自动日记和突发，不限制必要的补回和即时聊天判断。"
+  },
+  "backup_enabled": {
+    "description": "自动本地备份",
+    "type": "bool",
+    "default": true,
+    "hint": "定期保留独立状态备份，可在页面预览恢复指定人设。"
+  },
+  "backup_limit": {
+    "description": "本地备份保留数量",
+    "type": "int",
+    "default": 5,
+    "hint": "1～20；备份包含私有状态，请勿作为分享文件公开。"
+  },
+  "backup_interval_minutes": {
+    "description": "备份间隔（分钟）",
+    "type": "int",
+    "default": 60,
+    "hint": "5～1440；关键状态仍立即保存，备份按间隔轮换。"
+  },
+  "diary_archive_delay_minutes": {
+    "description": "日记自动归档缓冲（分钟）",
+    "type": "int",
+    "default": 5,
+    "hint": "0～120；当地日期结束后等待这段时间再自动写日记，手动生成不受影响。"
   }
 }

@@ -10,7 +10,7 @@ const source = fs.readFileSync(path.join(__dirname, '../pages/schedule/app.js'),
 const date = '2026-10-28';
 const fullDay = [{start:'00:00',end:'24:00',status:'free',title:'A 的安排'}];
 const detailFor = (personaId, day = date, timezone = 'Asia/Tokyo') => ({
-  persona_id:personaId,profile:{timezone,weekly:[]},calendar:{events:[]},
+  persona_id:personaId,edit_token:'version-'+personaId,profile:{timezone,weekly:[]},calendar:{events:[]},
   day:{date:day,slots:structuredClone(fullDay),summary:personaId+' 的一天'},
 });
 const baseState = () => ({settings:{timezone:'Asia/Hong_Kong'},
@@ -60,7 +60,10 @@ function harness(handler = async (method, resource, data) => {
     renderProviders=()=>{};renderDiary=()=>{};
     globalThis.ui={loadDetail,save,openEditor,applyBoundary,pollJob,recoverJob,init,chooseDate,
       requireDetailReady,controlsLocked,detailMatchesSelection,runPreview,loadHistory,restoreSnapshot,
-      loadRecurrences,saveRecurrences,openRecurrence,applyRecurrence,renderChatScope};
+      loadRecurrences,saveRecurrences,openRecurrence,applyRecurrence,renderChatScope,
+      postEdit,compareConflict,reloadAfterConflict,readAdditionalSettings,incidentPreviewPayload,
+      loadIncidents,endIncident,refreshEffectiveDay,previewImport,applyImport,readImportFile,
+      displayDay,requireDayEditing,normalizeDetail,renderBackupSettings,renderRuntimeMetrics,renderRecovery,updateLiveStatus};
   `,context);
   const run = code => vm.runInContext(code,context);
   context.seedDetail=detailFor('A');context.seedState=baseState();
@@ -68,6 +71,7 @@ function harness(handler = async (method, resource, data) => {
        $('persona').value='A';$('date').value='${date}';priorPersona='A';priorDate='${date}';`);
   const snapshot = () => JSON.parse(run(`JSON.stringify({detail,detailSelection,detailLoading,dirty,
     dirtyKinds:[...dirtyKinds],job,generating,followRoleToday,state,recurrenceData,recurrenceDraft,recurrenceDirty,historyData,previewData,previewBusy,
+    conflictData,importPreview,incidentData,showActualSchedule,dirtyBackupSettings,
     persona:$('persona').value,date:$('date').value,notice:$('notice').textContent})`));
   return {ui:context.ui,run,snapshot,calls,timers,element,context};
 }
@@ -415,4 +419,142 @@ test('an auxiliary diary error cannot discard unrelated drafts after a successfu
   assert.equal(h.snapshot().detail.profile.identity,'尚未保存的身份');
   assert.equal(h.snapshot().dirty,true);assert.deepEqual(h.snapshot().dirtyKinds,['profile']);
   assert.equal(h.ui.controlsLocked(),false);
+});
+
+test('saving submits the version loaded with the draft',async()=>{
+  const h=harness(async(method,resource,data)=>method==='POST'?{saved:true}:resource==='detail'?detailFor(data.persona_id,data.date):{});
+  await h.ui.save('day',detailFor('A').day);
+  assert.equal(h.calls.find(c=>c.resource==='save').data.expected_token,'version-A');
+});
+
+test('edit conflict and comparison keep unsaved detail and recurrence drafts intact',async()=>{
+  const fresh={...detailFor('A'),edit_token:'new-version'};fresh.day.summary='另一页面的安排';
+  const h=harness(async(method,resource)=>{
+    if(method==='POST')throw Object.assign(new Error('编辑冲突：资料已更新'),{status:409});
+    return resource==='detail'?fresh:{persona_id:'A',rules:[{title:'另一页面的纪念日'}],edit_token:'new-version'};
+  });
+  h.run("dirty=true;dirtyKinds.add('day');detail.day.summary='本地日程草稿';recurrenceDirty=true;recurrenceDraft=[{title:'本地规则草稿'}];");
+  await assert.rejects(h.ui.save('day',h.snapshot().detail.day),/编辑冲突/);
+  await h.ui.compareConflict();
+  const s=h.snapshot();assert.equal(s.detail.day.summary,'本地日程草稿');assert.equal(s.detail.edit_token,'version-A');
+  assert.equal(s.recurrenceDraft[0].title,'本地规则草稿');assert.equal(s.conflictData.latest.edit_token,'new-version');
+  assert.match(h.element('conflict-comparison').innerHTML,/本地日程草稿/);assert.match(h.element('conflict-comparison').innerHTML,/另一页面的安排/);
+  h.run('askConfirm=async()=>false;');const count=h.calls.length;await h.ui.reloadAfterConflict();assert.equal(h.calls.length,count);assert.equal(h.snapshot().dirty,true);
+});
+
+test('a recurring draft uses its own original version after an unrelated detail reload',async()=>{
+  const h=harness(async()=>{throw new Error('stop after payload');});h.context.rule=recurringRule;
+  h.run("askConfirm=async()=>true;recurrenceData={persona_id:'A',edit_token:'rules-old',rules:[rule]};recurrenceDraft=[rule];recurrenceDirty=true;detail.edit_token='detail-new';");
+  await assert.rejects(h.ui.saveRecurrences(),/stop after payload/);
+  assert.equal(h.calls[0].data.expected_token,'rules-old');assert.equal(h.snapshot().recurrenceDirty,true);
+});
+
+test('incident settings turn percentages into finite unit probabilities',()=>{
+  const h=harness();h.element('background-call-limit').value='0';h.element('diary-archive-delay').value='5';h.element('incident-enabled').checked=false;
+  for(const [value,expected] of [['20',.2],['0',0],['100',1],['12.5',.125]]){
+    h.element('incident-probability').value=value;const settings=h.ui.readAdditionalSettings();assert.equal(settings.incident_probability,expected);assert.equal(settings.incident_enabled,false);
+  }
+  for(const value of ['', 'NaN','Infinity','-1','101']){h.element('incident-probability').value=value;assert.throws(()=>h.ui.readAdditionalSettings(),/概率/);}
+});
+
+test('simulated incident is opt-in and only reaches the read-only preview endpoint',async()=>{
+  const h=harness(async()=>previewFor());const before=h.snapshot().detail;
+  h.element('preview-time').value='14:20';h.element('preview-incident-title').value='临时接待访客';h.element('preview-incident-status').value='busy';h.element('preview-incident-duration').value='30';
+  await h.ui.runPreview(false);assert.equal(h.calls[0].data.simulate_incident,undefined);
+  h.element('preview-incident-enabled').checked=true;await h.ui.runPreview(false);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls[1].data.simulate_incident)),{title:'临时接待访客',status:'busy',duration_minutes:30});
+  assert.ok(h.calls.every(c=>c.resource==='preview'));assert.deepEqual(h.snapshot().detail,before);
+  h.element('preview-incident-duration').value='61';await assert.rejects(h.ui.runPreview(false),/15|60|分钟/);assert.equal(h.calls.length,2);
+});
+
+test('incident responses for an old selection are ignored',async()=>{
+  const pending=deferred(),h=harness(()=>pending.promise);const running=h.ui.loadIncidents();
+  h.run("$('persona').value='B';");pending.resolve({persona_id:'A',entry:{id:'old'}});await running;
+  assert.equal(h.snapshot().incidentData,null);
+});
+
+test('ending an incident requires confirmation and submits an edit version',async()=>{
+  const h=harness(async()=>{throw new Error('cancel test request');});
+  h.run("incidentData={persona_id:'A',entry:{id:'incident-A',status:'active'}};askConfirm=async()=>false;");
+  await h.ui.endIncident('incident-A');assert.equal(h.calls.length,0);
+  h.run('askConfirm=async()=>true;');await assert.rejects(h.ui.endIncident('incident-A'),/cancel test request/);
+  assert.equal(h.calls[0].resource,'incident-end');assert.equal(h.calls[0].data.expected_token,'version-A');assert.equal(h.ui.controlsLocked(),false);
+});
+
+test('effective schedule refresh preserves draft versions and distinguishes base from actual events',async()=>{
+  const response=detailFor('A');response.edit_token='changed';response.base_day=structuredClone(response.day);response.day={...response.day,slots:[{...fullDay[0],title:'突发插曲',incident_id:'one'}]};
+  const h=harness(async()=>response);h.run("dirty=true;dirtyKinds.add('day');detail.day.summary='未保存安排';");
+  await h.ui.refreshEffectiveDay();assert.equal(h.snapshot().detail.day.summary,'未保存安排');assert.equal(h.snapshot().detail.edit_token,'version-A');
+  assert.equal(h.snapshot().detail.effective_day.slots[0].incident_id,'one');
+  h.run('dirty=false;dirtyKinds.clear();');await h.ui.refreshEffectiveDay();assert.equal(h.snapshot().detail.edit_token,'changed');
+  assert.equal(h.ui.displayDay().slots[0].title,'突发插曲');assert.throws(()=>h.ui.requireDayEditing(),/基础安排/);
+  h.run('showActualSchedule=false;');assert.doesNotThrow(()=>h.ui.requireDayEditing());assert.equal(h.ui.displayDay().slots[0].title,'A 的安排');
+});
+
+test('backup restore is previewed first and cancelled confirmation sends nothing',async()=>{
+  const h=harness(async()=>({preview_token:'preview-1',expected_token:'preview-version',changes:['更新 1 天安排'],summary:{days:1}}));
+  await h.ui.previewImport('backup-1');assert.equal(h.calls.length,1);assert.equal(h.calls[0].resource,'import-preview');assert.equal(h.calls[0].data.backup_id,'backup-1');
+  h.run('askConfirm=async()=>false;');await h.ui.applyImport();assert.equal(h.calls.length,1);assert.equal(h.snapshot().importPreview.preview_token,'preview-1');
+});
+
+test('confirmed restore uses the preview version even if a later refresh changed detail',async()=>{
+  const h=harness(async(method,resource)=>{if(resource==='import-preview')return {preview_token:'preview-1',expected_token:'preview-version'};throw new Error('编辑冲突：资料已更新');});
+  await h.ui.previewImport('backup-1');h.run("askConfirm=async()=>true;detail.edit_token='newer';dirty=true;dirtyKinds.add('day');detail.day.summary='保留草稿';");
+  await assert.rejects(h.ui.applyImport(),/编辑冲突/);
+  assert.equal(h.calls[1].data.expected_token,'preview-version');assert.equal(h.snapshot().detail.day.summary,'保留草稿');assert.equal(h.snapshot().dirty,true);
+});
+
+test('old import preview cannot replace a newly selected file or persona',async()=>{
+  for(const change of ['file','persona']){
+    const pending=deferred(),h=harness(()=>pending.promise);const running=h.ui.previewImport('backup-1');
+    if(change==='file')await h.ui.readImportFile({name:'fresh.json',size:2,text:async()=>'{}'});else h.run("$('persona').value='B';");
+    pending.resolve({preview_token:'stale'});await running;assert.equal(h.snapshot().importPreview,null);
+  }
+});
+
+test('backup settings draft survives ordinary settings rendering',()=>{
+  const h=harness();h.run("dirtyBackupSettings=true;$('backup-limit').value='12';");h.ui.renderBackupSettings();assert.equal(h.element('backup-limit').value,'12');
+});
+
+test('runtime usage does not invent token counts when provider omitted usage',()=>{
+  const h=harness();h.run("state.model_runtime={today:{purposes:{schedule:{calls:2,success:2}}}};state.storage_metrics={bytes:2048,last_ms:1.5,p95_ms:2};");
+  h.ui.renderRuntimeMetrics();assert.match(h.element('model-runtime-list').innerHTML,/未提供 token 用量/);assert.doesNotMatch(h.element('model-runtime-list').innerHTML,/输入 0/);
+  assert.match(h.element('storage-metrics').innerHTML,/2.0 KiB/);
+});
+
+test('late effective refresh cannot roll back a newer schedule or an ongoing save',async()=>{
+  const first=deferred(),second=deferred();let calls=0;
+  const h=harness(()=>++calls===1?first.promise:second.promise);
+  const a=h.ui.refreshEffectiveDay(),b=h.ui.refreshEffectiveDay();
+  second.resolve({...detailFor('A'),edit_token:'newest'});await b;
+  first.resolve({...detailFor('A'),edit_token:'stale'});await a;assert.equal(h.snapshot().detail.edit_token,'newest');
+  const pending=deferred(),g=harness(()=>pending.promise),refresh=g.ui.refreshEffectiveDay();g.run('saving=true;');
+  pending.resolve({...detailFor('A'),edit_token:'while-saving'});await refresh;assert.equal(g.snapshot().detail.edit_token,'version-A');
+});
+
+test('editing original slots keeps the live status tied to the actual incident',()=>{
+  const h=harness();h.run(`detail.profile.timezone='Asia/Hong_Kong';showActualSchedule=false;
+    detail.effective_day={date:'${date}',slots:[{start:'00:00',end:'24:00',status:'busy',title:'正在处理突发事情'}]};`);
+  h.ui.updateLiveStatus();assert.equal(h.element('current-title').textContent,'正在处理突发事情');assert.equal(h.element('current-state').textContent,'忙碌');
+  assert.equal(h.ui.displayDay().slots[0].status,'free');
+});
+
+test('recovery protection is visible on data and diagnostics without enabling or replaying anything',()=>{
+  const h=harness();h.run("state.storage_metrics={recovery:{at:1793320000,backup_id:'backup-fixture.json',requires_review:true}};backupData={backups:[{id:'backup-fixture.json',at:1793310000}]};");
+  h.ui.renderRuntimeMetrics();
+  for(const id of ['backup-recovery','diagnostic-recovery']){
+    assert.equal(h.element(id).hidden,false);assert.match(h.element(id).innerHTML,/已从备份恢复，请先核对/);
+    assert.match(h.element(id).innerHTML,/恢复时间/);assert.match(h.element(id).innerHTML,/来源/);
+    assert.match(h.element(id).innerHTML,/暂停插件控制/);assert.match(h.element(id).innerHTML,/旧队列已暂停/);
+  }
+  assert.equal(h.calls.length,0);
+});
+
+test('confirmed recovery becomes an informational record and absent recovery stays hidden',()=>{
+  const h=harness();h.run("state.storage_metrics={recovery:{at:1793320000,backup_id:'<fixture>',requires_review:false}};");
+  h.ui.renderRecovery();assert.match(h.element('backup-recovery').innerHTML,/已确认/);
+  assert.doesNotMatch(h.element('backup-recovery').innerHTML,/请先核对|暂停插件控制/);
+  assert.match(h.element('backup-recovery').innerHTML,/&lt;fixture&gt;/);
+  h.run('state.storage_metrics={};');h.ui.renderRecovery();
+  assert.equal(h.element('backup-recovery').hidden,true);assert.equal(h.element('diagnostic-recovery').hidden,true);
 });

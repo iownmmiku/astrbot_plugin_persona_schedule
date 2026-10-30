@@ -19,7 +19,7 @@ HISTORY_LIMIT = 20
 HISTORY_BYTES = 8 * 1024 * 1024
 SNAPSHOT_BYTES = 2 * 1024 * 1024
 LABELS = {"profile": "编辑档案与周表前", "calendar": "编辑年度活动前", "day": "编辑当天日程前",
-          "recurrences": "编辑重复活动前", "restore": "恢复快照前"}
+          "recurrences": "编辑重复活动前", "restore": "恢复快照前", "import": "导入安排前"}
 
 
 def _record_for_edit(records, persona):
@@ -87,8 +87,15 @@ class WorkbenchMixin:
         histories = self.store.data.get("edit_history", {})
         had_history, previous_history = pid in histories, histories.get(pid)
         removed = {}
+        previous_incidents = copy.deepcopy(self.store.data.get("incidents", {}))
         try:
             snapshot_id = self._archive_edit(persona, record_before, kind, day, record_after)
+            affected = None
+            if record_before.get("profile") == record_after.get("profile"):
+                before_days, after_days = record_before.get("days", {}), record_after.get("days", {})
+                affected = {d for d in set(before_days) | set(after_days) if before_days.get(d) != after_days.get(d)}
+            self._cancel_persona_incidents(persona, "手工安排优先，临时事件已结束",
+                                           persist=False, affected_dates=affected)
             records[pid] = record_after
             if clear_adjustments:
                 for umo, adjustment in list(self.adjustments.items()):
@@ -108,12 +115,13 @@ class WorkbenchMixin:
             if not had_root and not self.store.data.get("edit_history"):
                 self.store.data.pop("edit_history", None)
             self.adjustments.update(removed)
+            self.store.data["incidents"] = previous_incidents
             raise
 
     async def web_history(self, payload):
         persona = await self._persona(str(payload.get("persona_id", "")))
         entries = self.store.data.get("edit_history", {}).get(persona["id"], [])
-        return {"persona_id": persona["id"], "limit": HISTORY_LIMIT,
+        return {"persona_id": persona["id"], "limit": HISTORY_LIMIT, "edit_token": self._edit_token(persona),
                 "entries": [{**{key: entry[key] for key in ("id", "at", "kind", "date", "label", "changes")},
                              "can_restore": entry.get("persona_key") == persona["key"]}
                             for entry in reversed(entries)]}
@@ -125,6 +133,7 @@ class WorkbenchMixin:
             # A generation job may hold the lock while the user edits the
             # official persona. Never restore an old identity after that wait.
             await self._require_current_persona(persona)
+            self._require_edit_token(persona, payload)
             entry = next((entry for entry in self.store.data.get("edit_history", {}).get(persona["id"], [])
                           if entry["id"] == snapshot_id), None)
             if entry is None:
@@ -143,7 +152,7 @@ class WorkbenchMixin:
             # which was just undone, including a restored matching revision.
             undo_id = self._commit_edit(persona, current, restored, "restore", entry.get("date", ""), clear_adjustments=True)
         self.failures.clear()
-        return {"saved": True, "restored_id": snapshot_id, "snapshot_id": undo_id}
+        return {"saved": True, "restored_id": snapshot_id, "snapshot_id": undo_id, "edit_token": self._edit_token(persona)}
 
     async def web_preview(self, payload):
         persona = await self._persona(str(payload.get("persona_id", "")))
@@ -156,6 +165,7 @@ class WorkbenchMixin:
         if umo and umo.count(":") < 2:
             raise ValueError("预演对话应为完整的 AstrBot 会话来源 ID")
         record = copy.deepcopy(self.store.data["personas"].get(persona["id"], {}))
+        edit_token = self._edit_token(persona)
         settings_fingerprint = digest(self.store.settings)
         adjustment_snapshot = copy.deepcopy(self.adjustments.get(umo)) if umo else None
         profile, schedule = record.get("profile"), record.get("days", {}).get(day)
@@ -165,11 +175,16 @@ class WorkbenchMixin:
         now = datetime.fromisoformat(day + "T" + clock).replace(tzinfo=tz)
         if now.astimezone(timezone.utc).astimezone(tz).replace(tzinfo=None) != now.replace(tzinfo=None):
             raise ValueError("这个当地时间处于夏令时跳时区间，请选择有效时间")
+        original_slot, _ = slot_at(schedule, now)
+        schedule = self.effective_schedule(persona, schedule, now)
+        simulated = None
+        if payload.get("simulate_incident") is not None:
+            schedule, simulated = self.preview_incident(persona, schedule, now, payload)
         base, end = slot_at(schedule, now)
         previous_day, next_day = ((now.date() + timedelta(days=offset)).isoformat() for offset in (-1, 1))
         target = target_activity(schedule, now, self.store.settings["transition_notice_minutes"],
-                                 previous_schedule=record.get("days", {}).get(previous_day),
-                                 next_schedule=record.get("days", {}).get(next_day))
+                                 previous_schedule=self._cached_schedule(persona, previous_day, now),
+                                 next_schedule=self._cached_schedule(persona, next_day, now))
         env = await self.environment(umo) if umo else None
         matched = bool(env and env["persona"]["key"] == persona["key"] and env["persona"]["id"] == persona["id"])
         try:
@@ -190,9 +205,11 @@ class WorkbenchMixin:
             scope_reason = "所选对话在日程控制范围内"
         effective = copy.deepcopy(base)
         previous = copy.deepcopy(adjustment_snapshot) if matched else None
+        if simulated:
+            previous = None
         if previous and (previous.get("cid") != env["cid"] or previous.get("persona_key") != persona["key"]):
             previous = None
-        source = record.get("days", {}).get((previous or {}).get("date", ""))
+        source = self._cached_schedule(persona, (previous or {}).get("date", ""), now)
         if (self.store.settings["adaptive_enabled"] and matched
                 and (not previous or not previous.get("source_fingerprint") or source and digest(source) == previous["source_fingerprint"])):
             effective = effective_activity(base, now, previous, umo=umo, cid=env["cid"], persona_key=persona["key"],
@@ -217,10 +234,11 @@ class WorkbenchMixin:
                 model_error = "附近没有可判断的忙碌边界，保持现有安排"
             else:
                 try:
-                    async with self.generation_slots:
-                        decision = await asyncio.wait_for(self.generator.adaptive(persona, profile, schedule, target,
-                            message, [], umo if matched else "", active_conversation=active),
-                            min(25, self.store.settings["timeout_seconds"]))
+                    with self.generator.task_scope("preview", background=False):
+                        async with self.generation_slots:
+                            decision = await asyncio.wait_for(self.generator.adaptive(persona, profile, schedule, target,
+                                message, [], umo if matched else "", active_conversation=active),
+                                min(25, self.store.settings["timeout_seconds"]))
                     simulated_umo, simulated_cid = (umo, env["cid"]) if matched else ("preview:FriendMessage:sandbox", "preview")
                     adjustment = create_adjustment(decision, target, now, umo=simulated_umo, cid=simulated_cid,
                         persona_key=persona["key"], schedule_revision=record["days"][target["date"]].get("revision", 1),
@@ -244,6 +262,8 @@ class WorkbenchMixin:
             raise ValueError("预演期间配置或联系调整已变化，请重新预演；未修改实际日程")
         if current_persona["key"] != persona["key"] or digest(self.store.data["personas"].get(persona["id"])) != digest(record):
             raise ValueError("预演期间人设或日程已变化，请重新预演；未修改实际日程")
+        if edit_token != self._edit_token(persona):
+            raise ValueError("预演期间突发情况已变化，请重新预演；未修改实际日程")
         has_queue = bool(matched and self.store.data["queues"].get(umo))
         would_queue = controlled and (effective["status"] != "free" or has_queue)
         reason = ("忙碌时静默，恢复联系后合并补回" if effective["status"] == "busy" else
@@ -254,7 +274,8 @@ class WorkbenchMixin:
         if model_error:
             reason += "；" + model_error
         return {"persona_id": persona["id"], "date": day, "time": clock, "timezone": str(tz), "cached": True,
-                "read_only": True, "base_activity": copy.deepcopy(base), "effective_activity": effective,
+                "read_only": True, "base_activity": copy.deepcopy(original_slot), "effective_activity": effective,
+                "simulated_incident": simulated,
                 "status": effective["status"], "scope": {"enabled": self.store.settings["enabled"],
                     "allowed": controlled, "command_bypass": command, "reason": scope_reason},
                 "would_queue": would_queue, "delay_seconds": list(slow_bounds(effective, self.store.settings)) if effective["status"] == "slow" else None,

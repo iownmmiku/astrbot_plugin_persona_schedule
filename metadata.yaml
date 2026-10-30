@@ -1,7 +1,7 @@
 name: astrbot_plugin_persona_schedule
 display_name: 角色日程
 desc: 按人设和世界观生成日程、节庆活动与每日生活日记，支持空闲/半忙/忙碌、合并补回消息、对话白名单及内嵌 WebUI。
-version: 0.3.6
+version: 0.3.7
 author: iownmmiku
 repo: https://github.com/iownmmiku/astrbot_plugin_persona_schedule
 astrbot_version: ">=4.28,<5"

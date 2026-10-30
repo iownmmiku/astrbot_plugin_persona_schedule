@@ -101,9 +101,19 @@ def add_material(store, env, role, value, now, token):
            "persona_id": env["persona"]["id"], "persona_key": env["persona"]["key"],
            "day": local.date().isoformat(), "timezone": tz, "role": role,
            "text": value[:MAX_TEXT], "truncated": len(value) > MAX_TEXT}
+    previous_sequence = store.data.get("diary_sequence", 0)
+    row["sequence"] = previous_sequence + 1
     rows.append(row)
     _limit_materials(materials, row)
-    _save_materials(store, materials, previous)
+    store.data["diary_sequence"] = row["sequence"]
+    try:
+        _save_materials(store, materials, previous)
+    except Exception:
+        if previous_sequence:
+            store.data["diary_sequence"] = previous_sequence
+        else:
+            store.data.pop("diary_sequence", None)
+        raise
     return True
 
 

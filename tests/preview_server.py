@@ -137,6 +137,27 @@ async def main():
     plugin.store.data['sessions'][UMO] = {'umo':UMO,'cid':'conv-1','persona_id':'星野澪','platform':'test','title':'演示白名单对话','last_seen':material_at}
     add_material(plugin.store, material_env, 'user', '演示素材：今天路过便利店，想起你喜欢的饮料。', material_at, 'qa-user')
     add_material(plugin.store, material_env, 'assistant', '演示回复：下次经过时也留意一下吧。', material_at+1, 'qa-assistant')
+    # Deterministic historical fixture: an actual overlay for UI inspection,
+    # never a live random draw and never a real user's chat or activity.
+    from astrbot_plugin_persona_schedule.incidents import lottery_id
+    from astrbot_plugin_persona_schedule.backups import create_backup
+    incident_at = datetime.fromisoformat(yesterday+'T12:15:00').replace(tzinfo=ZoneInfo('Asia/Tokyo')).timestamp()
+    incident_id = lottery_id(p, yesterday)
+    plugin.store.data['incidents'] = {incident_id: {
+        'id': incident_id, 'persona_id': p['id'], 'persona_key': p['key'],
+        'date': yesterday, 'timezone': 'Asia/Tokyo', 'probability': .2,
+        'status': 'ended', 'reason': '演示记录：临时帮忙结束，已回到原安排。',
+        'created_at': incident_at-60, 'updated_at': incident_at+1800,
+        'started_at': incident_at, 'ends_at': incident_at+1800, 'actual_end': incident_at+1800,
+        'incident': {'title': '演示：帮同学整理文化祭物料', 'note': '只用于界面验证的虚构插曲。',
+                     'category': 'errand', 'status': 'busy', 'duration_minutes': 30},
+    }}
+    plugin.store.settings.update(incident_enabled=False, incident_probability=.2,
+                                daily_background_call_limit=0, backup_enabled=True,
+                                backup_limit=5, backup_interval_minutes=60,
+                                diary_archive_delay_minutes=5)
+    plugin.store.save()
+    create_backup(plugin.store)
     bridge = '''<script>window.AstrBotPluginView={ready:async()=>({isDark:false}),apiGet:async(path,query)=>{const r=await fetch('/qa-api/'+path+'?'+new URLSearchParams(query||{}));const d=await r.json();if(!r.ok)throw Error(d.message);return d},apiPost:async(path,body)=>{const r=await fetch('/qa-api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.message);return d}};</script>'''
     async def index(request):
         html=(ROOT/'pages/schedule/index.html').read_text(encoding='utf-8').replace('<head>','<head>'+bridge)
@@ -149,6 +170,10 @@ async def main():
         if name not in {'app.js','style.css','vendor/rhinelab/content-transition.js'}:raise web.HTTPNotFound()
         return web.FileResponse(ROOT/'pages/schedule'/name)
     handlers={"state":plugin.web_state,"detail":plugin.web_detail,"settings":plugin.web_settings,"generate":plugin.web_generate,"job":plugin.web_job,"save":plugin.web_save,"queue":plugin.web_queue,"providers":plugin.web_providers,"diagnostics":plugin.web_diagnostics,"diary":plugin.web_diary,"preview":plugin.web_preview,"history":plugin.web_history,"restore":plugin.web_restore,"recurrences":plugin.web_recurrences,"recurrences-save":plugin.web_save_recurrences}
+    handlers.update({'incidents':plugin.web_incidents,'incident-end':plugin.web_incident_end,
+                     'backups':plugin.web_backups,'backup-create':plugin.web_backup_create,
+                     'export':plugin.web_export,'import-preview':plugin.web_import_preview,
+                     'import-apply':plugin.web_import_apply})
     async def api(request):
         try:
             payload=await request.json() if request.method=='POST' else dict(request.query)
@@ -157,7 +182,7 @@ async def main():
                 value.setdefault('adaptation_log', plugin.store.data['adaptation_log'])
             return web.json_response(value)
         except Exception as exc:
-            return web.json_response({'message':str(exc)},status=400)
+            return web.json_response({'message':str(exc)},status=409 if type(exc).__name__ == 'EditConflict' else 400)
     app=web.Application();app.router.add_get('/',index);app.router.add_route('*','/qa-api/{name}',api);app.router.add_get('/{name:.+}',asset)
     runner=web.AppRunner(app);await runner.setup();await web.TCPSite(runner,'127.0.0.1',8769).start()
     print('QA preview: http://127.0.0.1:8769 (fixture data only)',flush=True)

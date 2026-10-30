@@ -69,7 +69,30 @@ sys.modules["astrbot.core.agent.message"].TextPart = FakeTextPart
 from astrbot_plugin_persona_schedule.core import (DEFAULTS, Store, active_events, allowed, digest,
     slot_at, validate_events, validate_profile, validate_settings, validate_slots)
 from astrbot_plugin_persona_schedule.generator import Generator, parse_object, public_calendar
-from astrbot_plugin_persona_schedule.main import NAME, PersonaSchedule
+from astrbot_plugin_persona_schedule.main import NAME, PersonaSchedule as ActualPersonaSchedule
+
+
+class PersonaSchedule(ActualPersonaSchedule):
+    """Legacy fixtures simulate a freshly loaded editor unless a token is given.
+
+    Conflict/API tests invoke ActualPersonaSchedule methods to verify missing
+    tokens too; this keeps unrelated older behavioral fixtures readable.
+    """
+    async def _editor_payload(self, payload):
+        result = dict(payload)
+        if "expected_token" not in result:
+            persona = await self._persona(str(result.get("persona_id", "")))
+            result["expected_token"] = self._edit_token(persona)
+        return result
+
+    async def web_save(self, payload):
+        return await super().web_save(await self._editor_payload(payload))
+
+    async def web_save_recurrences(self, payload):
+        return await super().web_save_recurrences(await self._editor_payload(payload))
+
+    async def web_restore(self, payload):
+        return await super().web_restore(await self._editor_payload(payload))
 
 UMO = "test:FriendMessage:123"
 
@@ -504,7 +527,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_web_routes_use_plugin_prefix(self):
         self.assertEqual({r[0].rsplit('/',1)[-1] for r in self.ctx.routes},
                          {'state','settings','detail','generate','job','save','queue','providers','diagnostics','diary',
-                          'preview','history','restore','recurrences','recurrences-save'})
+                          'preview','history','restore','recurrences','recurrences-save','incidents','incident-end',
+                          'backups','backup-create','export','import-preview','import-apply'})
         self.assertTrue(all(r[0].startswith('/'+NAME+'/') for r in self.ctx.routes))
 
     async def test_cached_schedule_is_stable_and_no_extra_model_calls(self):

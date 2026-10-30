@@ -110,6 +110,10 @@ async def run_smoke(isolation: Path):
             elif "第一人称生活日记" in (system_prompt or ""):
                 value = {"title": "旅途的一页", "mood": "平静",
                          "content": "今天在旅途中停下脚步，在住处慢慢休息。我把平静的一天记在这里。"}
+            elif "突发生活插曲" in (system_prompt or ""):
+                value = {"suitable": True, "title": "帮邻居搬行李", "note": "在旅馆临时帮邻居搬行李。",
+                         "status": "busy", "duration_minutes": 30, "category": "help",
+                         "reason": "旅人原本在休息，临时伸出援手符合人设。"}
             elif ADAPTIVE in (system_prompt or ""):
                 value = {"action": "defer", "activity_kind": "sleep", "importance": "normal",
                          "delay_minutes": 30, "reason": "还在延续刚才的话题，稍后再休息。",
@@ -158,8 +162,11 @@ async def run_smoke(isolation: Path):
     context.registered_web_apis = []
     plugin = PersonaSchedule(context, config)
 
-    async def request_api(name, method="GET", payload=None):
-        payload = payload or {}
+    async def request_api(name, method="GET", payload=None, *, expected_status=200):
+        payload = dict(payload or {})
+        if name in {"save", "recurrences-save", "restore", "incident-end", "import-apply"} and "expected_token" not in payload:
+            selected = await plugin._persona(str(payload.get("persona_id", "")))
+            payload["expected_token"] = plugin._edit_token(selected)
         route = next(r for r in context.registered_web_apis if r[0] == f"/{NAME}/{name}" and method in r[2])
         body = json.dumps(payload).encode()
         async def receive():
@@ -170,7 +177,7 @@ async def run_smoke(isolation: Path):
                  "headers": [(b"content-type", b"application/json")]}
         with bind_request_context(PluginRequest(Request(scope, receive), plugin_name=NAME, username="offline-smoke")):
             response = await route[1]()
-        assert response.status_code == 200, f"{name} returned HTTP {response.status_code}"
+        assert response.status_code == expected_status, f"{name} returned HTTP {response.status_code}: {response.body!r}"
         return json.loads(response.body)
 
     try:
@@ -629,6 +636,155 @@ async def run_smoke(isolation: Path):
         assert (await conversations.get_conversation(first_umo, first_cid)).history == first_conversation.history
         await request_api("settings", "POST", {"whitelist":[], "all_chats_enabled":True})
         checks.append("real initial empty-CID event binds through ProviderRequest conversation; user/assistant share one journal chat and reset excludes late reply")
+
+        # Two editors read one revision through the native endpoint. Only the
+        # first may commit; HTTP 409 must preserve its data and the stale draft.
+        editor = await request_api("detail", payload={"persona_id": persona["id"], "date": day})
+        token = editor["edit_token"]
+        original = copy.deepcopy(plugin.store.data["personas"][persona["id"]]["days"][day])
+        draft = {**copy.deepcopy(original), "summary": "First SDK editor saved this revision"}
+        committed = await request_api("save", "POST", {"persona_id": persona["id"], "date": day,
+            "kind": "day", "value": draft, "expected_token": token})
+        assert committed["edit_token"] != token
+        after_commit = copy.deepcopy(plugin.store.data)
+        after_commit_disk = plugin.store.path.read_bytes()
+        conflict = await request_api("save", "POST", {"persona_id": persona["id"], "date": day,
+            "kind": "day", "value": original, "expected_token": token}, expected_status=409)
+        assert "编辑冲突" in json.dumps(conflict, ensure_ascii=False)
+        assert plugin.store.data == after_commit and plugin.store.path.read_bytes() == after_commit_disk
+        await request_api("restore", "POST", {"persona_id": persona["id"], "id": committed["snapshot_id"]})
+        checks.append("native SDK edit token + stale second editor HTTP 409 + atomic disk/state preservation")
+
+        # A deterministic clock controls only the local scenario. Actual SDK
+        # events, providers, SQLite conversation and native routes remain real.
+        from astrbot_plugin_persona_schedule.incidents import lottery_id
+        incident_clock = datetime.fromisoformat(day + "T10:00:00").replace(tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+
+        class FrozenIncidentTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.fromtimestamp(incident_clock, tz)
+
+        async def incident_tick():
+            plugin._schedule_incidents(incident_clock)
+            await asyncio.wait_for(asyncio.gather(*list(plugin.tasks)), 5)
+
+        before_incident = (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent))
+        with patch("astrbot_plugin_persona_schedule.main.datetime", FrozenIncidentTime), \
+                patch("astrbot_plugin_persona_schedule.interaction.datetime", FrozenIncidentTime), \
+                patch("astrbot_plugin_persona_schedule.main.time.time", side_effect=lambda: incident_clock), \
+                patch.object(plugin, "_incident_now", side_effect=lambda: incident_clock), \
+                patch.object(plugin, "incident_rng", SimpleNamespace(random=lambda: 0.1, randrange=lambda size: 0)):
+            await request_api("settings", "POST", {"incident_enabled": True, "incident_probability": 1.0})
+            untouched = copy.deepcopy(plugin.store.data)
+            preview = await request_api("preview", "POST", {"persona_id": persona["id"], "date": day,
+                "time": "10:00", "umo": umo, "message": "等忙完再聊", "simulate_incident": {
+                    "title": "模拟临时事项", "status": "busy", "duration_minutes": 20}})
+            assert preview["read_only"] and preview["would_queue"] and not preview["model_evaluated"]
+            assert preview["effective_activity"]["status"] == "busy" and preview["simulated_incident"]
+            assert plugin.store.data == untouched
+            assert before_incident == (len(schedule_provider.calls), len(reply_provider.calls), len(recording.sent))
+            free_context = await plugin.get_proactive_context(umo)
+            await incident_tick()
+            identity = lottery_id(persona, day)
+            entry = plugin.store.data["incidents"][identity]
+            assert entry["status"] == "pending" and len(schedule_provider.calls) == before_incident[0]
+            incident_clock = entry["trigger_at"]
+            await incident_tick()
+            entry = plugin.store.data["incidents"][identity]
+            assert entry["status"] == "active" and len(schedule_provider.calls) == before_incident[0] + 1
+            assert "conversation_material" not in json.loads(schedule_provider.calls[-1]["prompt"])
+            incident_clock = entry["started_at"]
+            busy_context = await plugin.get_proactive_context(umo)
+            assert free_context["allowed"] and not busy_context["allowed"] and busy_context["status"] == "busy"
+            assert free_context["context_key"] != busy_context["context_key"]
+            for message in ("忙完再回复就好。", "回来后一起聊旅途吧。"):
+                incoming = event(message)
+                await plugin.intercept_message(incoming)
+                assert incoming.is_stopped()
+            assert len(plugin.store.data["queues"][umo]["messages"]) == 2
+            await plugin._session_tick(umo, plugin.store.data["sessions"][umo])
+            assert len(recording.sent) == before_incident[2] and len(reply_provider.calls) == before_incident[1]
+            incident_clock = entry["ends_at"]
+            await incident_tick()
+            for _ in range(2):
+                await plugin._session_tick(umo, plugin.store.data["sessions"][umo])
+            assert len(recording.sent) == before_incident[2] + 1 and len(reply_provider.calls) == before_incident[1] + 1
+            assert umo not in plugin.store.data["queues"]
+            resumed = await plugin.get_proactive_context(umo)
+            assert resumed["allowed"] and resumed["context_key"] != busy_context["context_key"]
+            actual = await request_api("incidents", payload={"persona_id": persona["id"]})
+            assert actual["entry"]["status"] == "ended" and actual["history"]
+            assert "persona_key" not in json.dumps(actual) and "source_fingerprint" not in json.dumps(actual)
+        await request_api("settings", "POST", {"incident_enabled": False})
+        checks.append("real SDK incident draw/generation + busy silence + one post-incident aggregate + Canvas boundary + read-only native simulation")
+
+        # A reviewed backup restores only the selected role's schedule. Private
+        # queues, completed incident decisions and unrelated roles stay intact.
+        await personas.create_persona("offline-neighbor", "原创世界的邻居，有自己的生活安排。", tools=[])
+        neighbor = await plugin._persona("offline-neighbor")
+        await plugin.ensure(neighbor, day=day)
+        current_plan = plugin.store.data["personas"][persona["id"]]["days"][day]
+        current_plan["slots"][0]["status"] = "busy"
+        retained_message = event("这条离线留言应保留在原队列。")
+        await plugin.intercept_message(retained_message)
+        assert retained_message.is_stopped()
+        current_plan["slots"][0]["status"] = "free"
+        plugin.store.save()
+        preserved = {key: copy.deepcopy(plugin.store.data[key]) for key in ("queues", "incidents", "diaries")}
+        neighbor_before = copy.deepcopy(plugin.store.data["personas"][neighbor["id"]])
+        backup = (await request_api("backup-create", "POST"))["backup"]
+        listing = await request_api("backups")
+        assert any(row["id"] == backup["id"] and row["valid"] for row in listing["backups"])
+        exported = await request_api("export", payload={"persona_id": persona["id"]})
+        export_text = json.dumps(exported, ensure_ascii=False)
+        assert exported["format"] == "persona-schedule-export" and exported["record"]["days"]
+        assert all(value not in export_text for value in ('"key"', '"persona_key"', '"messages"', '"queues"', '"diaries"', "fixture-secret", retained_message.message_str))
+        await request_api("save", "POST", {"persona_id": persona["id"], "date": day, "kind": "day",
+            "value": {**copy.deepcopy(current_plan), "summary": "Changed after local backup"}})
+        before_import = copy.deepcopy(plugin.store.data)
+        import_preview = await request_api("import-preview", "POST", {"persona_id": persona["id"], "backup_id": backup["id"]})
+        assert import_preview["changes"] and plugin.store.data == before_import
+        applied = await request_api("import-apply", "POST", {"persona_id": persona["id"],
+            "preview_token": import_preview["preview_token"], "expected_token": import_preview["expected_token"]})
+        assert applied["saved"] and applied["edit_token"]
+        assert plugin.store.data["personas"][persona["id"]]["days"][day]["summary"] == current_plan["summary"]
+        assert plugin.store.data["personas"][neighbor["id"]] == neighbor_before
+        assert all(plugin.store.data[key] == value for key, value in preserved.items())
+        await request_api("queue", "POST", {"umo": umo, "action": "clear"})
+        checks.append("native checksummed backup create/list + redacted share export + reviewed persona-only restore preserves queues, incident ledger and other role")
+
+        await plugin.ensure_diary(persona, yesterday, umo, force=True)
+        clean_diary = await request_api("diary", payload={"persona_id": persona["id"], "date": yesterday})
+        assert not clean_diary["source_changed"]
+        before_diary_change = len(diary_provider.calls)
+        edited_yesterday = copy.deepcopy(plugin.store.data["personas"][persona["id"]]["days"][yesterday])
+        edited_yesterday["summary"] = "归档后补充的角色生活安排"
+        await request_api("save", "POST", {"persona_id": persona["id"], "date": yesterday,
+            "kind": "day", "value": edited_yesterday})
+        changed_diary = await request_api("diary", payload={"persona_id": persona["id"], "date": yesterday})
+        assert changed_diary["source_changed"] and changed_diary["source_change_reasons"]
+        assert changed_diary["entry"]["content"] == clean_diary["entry"]["content"]
+        assert len(diary_provider.calls) == before_diary_change
+        await request_api("settings", "POST", {"diary_archive_delay_minutes": 12})
+        assert (await request_api("state"))["settings"]["diary_archive_delay_minutes"] == 12
+        await request_api("settings", "POST", {"diary_archive_delay_minutes": 121}, expected_status=400)
+        assert plugin.store.settings["diary_archive_delay_minutes"] == 12
+        checks.append("native diary source_changed notice preserves archive until regeneration + validated end-of-day archive buffer setting")
+
+        await request_api("settings", "POST", {"daily_background_call_limit": 1})
+        before_metrics = (len(schedule_provider.calls), len(reply_provider.calls), len(diary_provider.calls), len(recording.sent))
+        runtime_state = await request_api("state")
+        runtime_diagnostics = await request_api("diagnostics", payload={"umo": umo})
+        for response in (runtime_state, runtime_diagnostics):
+            runtime = response["model_runtime"]
+            assert runtime["background_limit"] == 1 and runtime["background_used"] >= 1
+            assert runtime["active"] == runtime["queued"] == 0
+            assert runtime["today"]["purposes"]["incident"]["success"] == 1
+            assert runtime["today"]["purposes"]["reply"]["success"] >= 2
+            assert "fixture-secret" not in json.dumps(response)
+        assert before_metrics == (len(schedule_provider.calls), len(reply_provider.calls), len(diary_provider.calls), len(recording.sent))
+        checks.append("native model-runtime purpose statistics + background budget configuration readable without model calls or delivery")
 
         await plugin.initialize()
         await asyncio.sleep(0.05)

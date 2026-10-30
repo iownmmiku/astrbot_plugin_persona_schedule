@@ -24,6 +24,7 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
         # Daily planning has separate regressions. Keep these tests specific
         # to diary scheduling and provider invocation counts.
         self.plugin.store.settings['auto_schedule_enabled'] = False
+        self.plugin.store.settings['diary_archive_delay_minutes'] = 0
         self.persona = await self.plugin._persona('traveler')
         self.today = datetime.now(ZoneInfo('Asia/Shanghai')).date()
         self.day = (self.today - timedelta(days=1)).isoformat()
@@ -144,7 +145,12 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_archive_write_does_not_cache_unsaved_diary(self):
         before_logs = copy.deepcopy(self.plugin.store.data['logs'])
-        with patch.object(self.plugin.store, 'save', side_effect=OSError('disk full')):
+        original_save = self.plugin.store.save
+        def fail_archive():
+            if self.day in self.plugin.store.data['diaries'].get('traveler', {}):
+                raise OSError('disk full')
+            original_save()
+        with patch.object(self.plugin.store, 'save', side_effect=fail_archive):
             with self.assertRaises(OSError):
                 await self.write()
         self.assertNotIn(self.day, self.plugin.store.data['diaries']['traveler'])
@@ -161,10 +167,16 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.store.settings['diary_limit'] = 7
         self.plugin.store.save()
         before = copy.deepcopy(self.plugin.store.data)
-        with patch.object(self.plugin.store, 'save', side_effect=OSError('disk full')):
+        original_save = self.plugin.store.save
+        def fail_rewrite():
+            if entries[self.day]['revision'] > entry['revision']:
+                raise OSError('disk full')
+            original_save()
+        with patch.object(self.plugin.store, 'save', side_effect=fail_rewrite):
             with self.assertRaises(OSError):
                 await self.write(force=True)
-        self.assertEqual(self.plugin.store.data, before)
+        self.assertEqual(self.plugin.store.data['diaries'], before['diaries'])
+        self.assertEqual(self.plugin.store.data['logs'], before['logs'])
         self.assertEqual(Store(self.temp.name).data['diaries'], before['diaries'])
 
     async def test_persona_change_preserves_history_and_marks_old_identity(self):

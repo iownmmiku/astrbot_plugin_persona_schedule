@@ -36,7 +36,7 @@ class InteractionMixin:
             return slot
         adjustment = self.adjustments.get(env["umo"])
         record = self.store.data["personas"].get(env["persona"]["id"], {})
-        source = record.get("days", {}).get((adjustment or {}).get("date", ""))
+        source = self._cached_schedule(env["persona"], (adjustment or {}).get("date", ""), now)
         if adjustment and adjustment.get("source_fingerprint") and (not source or digest(source) != adjustment["source_fingerprint"]):
             return slot
         return effective_activity(slot, now, adjustment, umo=env["umo"], cid=env["cid"],
@@ -48,8 +48,8 @@ class InteractionMixin:
         tomorrow = (now.date() + timedelta(days=1)).isoformat()
         yesterday = (now.date() - timedelta(days=1)).isoformat()
         return target_activity(schedule, now, self.store.settings["transition_notice_minutes"],
-                               next_schedule=record.get("days", {}).get(tomorrow),
-                               previous_schedule=record.get("days", {}).get(yesterday))
+                               next_schedule=self._cached_schedule(env["persona"], tomorrow, now),
+                               previous_schedule=self._cached_schedule(env["persona"], yesterday, now))
 
     @staticmethod
     def _history(env):
@@ -112,7 +112,7 @@ class InteractionMixin:
             meta["reviews"][target["token"]] = {"at": now.timestamp(), "tone": "plain", "notice": "", "active": active}
             meta["reviews"] = dict(list(meta["reviews"].items())[-24:])
             self.store.save()
-            source = self.store.data["personas"][env["persona"]["id"]]["days"].get(target["date"])
+            source = self._cached_schedule(env["persona"], target["date"], now)
             if not source:
                 return
             fingerprint = digest(source)
@@ -125,7 +125,7 @@ class InteractionMixin:
                 record = self.store.data["personas"].get(env["persona"]["id"], {})
                 if (not current or current["cid"] != env["cid"] or current["persona"]["key"] != env["persona"]["key"]
                         or not self.store.settings["adaptive_enabled"] or not self._interaction_allowed(umo)
-                        or digest(record.get("days", {}).get(target["date"])) != fingerprint):
+                        or digest(self._cached_schedule(env["persona"], target["date"])) != fingerprint):
                     return
                 meta["reviews"][target["token"]].update(tone=decision["tone"], notice=decision["notice"])
                 adjustment = create_adjustment(decision, target, datetime.now(ZoneInfo(profile["timezone"])),
@@ -153,7 +153,7 @@ class InteractionMixin:
         target = self._target(env, schedule, now)
         if not target:
             return None
-        source = self.store.data["personas"].get(env["persona"]["id"], {}).get("days", {}).get(target["date"])
+        source = self._cached_schedule(env["persona"], target["date"], now)
         slot = self._effective_slot(env, source or schedule, target["slot"], now)
         change = slot.get("adaptive")
         pending = self.adjustments.get(env["umo"], {})
@@ -203,7 +203,7 @@ class InteractionMixin:
         if slot.get("adaptive"):
             instruction += "当前是有限的联系调整；继续回应用户，睡前带些自然倦意，不要突然宣布已经睡着。不能承诺无限陪聊，调整截止后恢复原安排。"
         pending = self.adjustments.get(env["umo"], {})
-        pending_source = self.store.data["personas"].get(env["persona"]["id"], {}).get("days", {}).get(pending.get("date", ""))
+        pending_source = self._cached_schedule(env["persona"], pending.get("date", ""), now)
         if (self.store.settings["adaptive_enabled"] and pending.get("cid") == env["cid"]
                 and pending.get("persona_key") == env["persona"]["key"] and now.timestamp() < pending.get("starts_at", 0)):
             if pending_source and (not pending.get("source_fingerprint") or digest(pending_source) == pending["source_fingerprint"]):
@@ -265,7 +265,7 @@ class InteractionMixin:
             record = self.store.data["personas"].get(env["persona"]["id"], {})
             current_profile = record.get("profile")
             check = datetime.now(ZoneInfo((current_profile or profile)["timezone"]))
-            plan = record.get("days", {}).get(check.date().isoformat())
+            plan = self._cached_schedule(env["persona"], check.date().isoformat(), check)
             latest = self._notice_target(env, plan, check) if plan else None
             # minutes_until changes continuously, compare the stable identity.
             if (not current or current["cid"] != env["cid"] or current["persona"]["key"] != env["persona"]["key"]

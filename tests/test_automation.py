@@ -120,8 +120,8 @@ class AutomationTests(unittest.IsolatedAsyncioTestCase):
         record = self.plugin.store.data['personas']['traveler']
         record['days'].clear()
         original = self.plugin.generator.day
-        async def disabled(*args):
-            value = await original(*args)
+        async def disabled(*args, **kwargs):
+            value = await original(*args, **kwargs)
             self.plugin.store.settings['auto_schedule_enabled'] = False
             return value
         self.plugin.generator.day = disabled

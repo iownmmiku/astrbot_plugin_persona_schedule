@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import tempfile
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -145,6 +147,19 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "busy")
         self.assertIsNone(result["decision"])
         self.assertIn("保留", result["reason"])
+
+    async def test_explicit_model_preview_has_separate_foreground_usage(self):
+        decision = {"action": "keep", "activity_kind": "sleep", "importance": "normal",
+                    "delay_minutes": 0, "reason": "按计划休息", "tone": "tired", "notice": ""}
+        self.context.llm_generate = AsyncMock(return_value=SimpleNamespace(completion_text=json.dumps(decision)))
+        self.plugin.store.settings["daily_background_call_limit"] = 1
+        result = await self.preview(evaluate=True)
+        self.assertTrue(result["model_evaluated"])
+        usage = self.plugin.generator.runtime.snapshot()["today"]
+        self.assertEqual(usage["purposes"]["preview"]["success"], 1)
+        self.assertNotIn("adaptive", usage["purposes"])
+        self.assertEqual(usage["background_calls"], 0)
+        self.assertEqual(self.context.sent, [])
 
     async def test_simulated_deferral_is_anchored_to_original_start(self):
         self.plugin.generator.adaptive = AsyncMock(return_value={"action": "defer", "activity_kind": "sleep",

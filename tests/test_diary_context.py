@@ -1,6 +1,7 @@
 """Whitelist journal materials use API doubles, never historical-chat scraping."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import tempfile
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from test_schedule import FakeConfig, FakeContext, FakeEvent, NAME, PersonaSchedule, Store, UMO
-from astrbot_plugin_persona_schedule.diary_context import add_material, prune_materials, select_materials
+from astrbot_plugin_persona_schedule.diary_context import add_material, bind_initial_material, prune_materials, select_materials
 
 
 class DiaryContextTests(unittest.IsolatedAsyncioTestCase):
@@ -178,7 +179,7 @@ class DiaryContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_whitelist_change_during_model_generation_discards_old_result(self):
         await self.capture()
-        async def revoke(*args):
+        async def revoke(*args, **kwargs):
             self.plugin.store.settings['whitelist'] = []
             return {'title':'旧结果', 'content':'不应归档', 'mood':''}
         self.plugin.generator.diary = revoke
@@ -216,3 +217,143 @@ class DiaryContextTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.plugin.ensure_diary(self.persona, self.day, UMO)
         self.assertEqual(entry['source']['chat_context']['message_count'], 0)
         self.assertEqual(self.ctx.conversation_manager.get_conversation.await_count, 0)
+
+    async def test_revocation_while_waiting_for_generation_slot_never_sends_old_text(self):
+        await self.capture('撤销前的私密素材')
+        self.plugin.generation_slots = asyncio.Semaphore(0)
+        task = asyncio.create_task(self.plugin.ensure_diary(self.persona, self.day, UMO))
+        await asyncio.sleep(0)
+        self.assertTrue(self.plugin.generation_slots._waiters)
+        await self.plugin.web_settings({'whitelist': []})
+        self.plugin.generation_slots.release()
+        with self.assertRaisesRegex(ValueError, '已变化'):
+            await task
+        self.assertEqual(self.ctx.calls, [])
+
+    async def test_revocation_during_provider_lookup_prevents_model_call(self):
+        await self.capture('撤销前的私密素材')
+        async def provider(*args, **kwargs):
+            await self.plugin.web_settings({'diary_chat_enabled': False})
+            return 'fake-provider'
+        self.plugin.generator.provider_id = provider
+        with self.assertRaisesRegex(ValueError, '已变化'):
+            await self.plugin.ensure_diary(self.persona, self.day, UMO)
+        self.assertEqual(self.ctx.calls, [])
+
+    async def test_revocation_after_invalid_response_prevents_format_retry(self):
+        await self.capture('不能因格式重试再次发送')
+        async def invalid(**kwargs):
+            self.ctx.calls.append(kwargs)
+            await self.plugin.web_settings({'whitelist': []})
+            return types.SimpleNamespace(completion_text='invalid json')
+        self.ctx.llm_generate = invalid
+        with self.assertRaisesRegex(ValueError, '已变化'):
+            await self.plugin.ensure_diary(self.persona, self.day, UMO)
+        self.assertEqual(len(self.ctx.calls), 1)
+        self.assertNotIn(self.day, self.plugin.store.data['diaries']['traveler'])
+
+    async def test_sync_guard_failure_is_not_retried_or_added_to_format_prompt(self):
+        checked = []
+        def invalidated():
+            checked.append(True)
+            raise ValueError('private fixture guard detail')
+        with self.assertRaisesRegex(ValueError, 'private fixture guard detail'):
+            await self.plugin.generator.structured('fixture', {}, lambda x: x,
+                                                   before_generate=invalidated)
+        self.assertEqual(checked, [True])
+        self.assertEqual(self.ctx.calls, [])
+
+    async def test_first_conversation_input_and_reply_share_one_identity(self):
+        self.plugin.store.settings.update(whitelist_enabled=False, all_chats_enabled=False)
+        self.ctx.conversation_manager.cid = ''
+        event = await self.capture('首次聊天')
+        self.ctx.conversation_manager.cid = 'newly-created'
+        conversation = await self.ctx.conversation_manager.get_conversation(UMO, 'newly-created')
+        req = types.SimpleNamespace(conversation=conversation, extra_user_content_parts=[])
+        await self.plugin.inject_schedule(event, req)
+        with patch('astrbot_plugin_persona_schedule.main.time.time', return_value=self.at + 1):
+            await self.plugin.capture_diary_response(event, types.SimpleNamespace(completion_text='首次回应'))
+        material = self.material()
+        self.assertEqual([r['role'] for r in material['messages']], ['user', 'assistant'])
+        self.assertEqual(material['conversation_count'], 1)
+        self.assertTrue(all(r['cid'] == 'newly-created' for r in self.plugin.store.data['diary_chat']['messages']))
+
+    async def test_initial_bind_requires_request_and_current_conversation_match(self):
+        self.plugin.store.settings.update(whitelist_enabled=False, all_chats_enabled=False)
+        self.ctx.conversation_manager.cid = ''
+        event = await self.capture()
+        self.ctx.conversation_manager.cid = 'current-conversation'
+        req = types.SimpleNamespace(conversation=types.SimpleNamespace(cid='different-request', persona_id='traveler'),
+                                    extra_user_content_parts=[])
+        await self.plugin.inject_schedule(event, req)
+        with patch('astrbot_plugin_persona_schedule.main.time.time', return_value=self.at + 1):
+            await self.plugin.capture_diary_response(event, types.SimpleNamespace(completion_text='不应跨会话绑定'))
+        self.assertEqual(self.material()['message_count'], 1)
+        self.assertEqual(self.plugin.store.data['diary_chat']['messages'][0]['cid'], '')
+
+    async def test_binding_keeps_original_time_truncation_and_platform_dedup(self):
+        initial = {**self.env, 'cid': ''}
+        add_material(self.plugin.store, initial, 'user', 'x' * 1100, self.at, 'first-platform-id')
+        before = copy.deepcopy(self.plugin.store.data['diary_chat']['messages'][0])
+        self.assertTrue(bind_initial_material(self.plugin.store, initial, self.env, 'first-platform-id'))
+        row = self.plugin.store.data['diary_chat']['messages'][0]
+        self.assertEqual(row['at'], before['at'])
+        self.assertEqual(row['day'], before['day'])
+        self.assertEqual(row['text'], before['text'])
+        self.assertTrue(row['truncated'])
+        self.assertFalse(add_material(self.plugin.store, self.env, 'user', 'x' * 1100, self.at, 'first-platform-id'))
+        self.assertEqual(self.material()['message_count'], 1)
+
+    async def test_binding_never_moves_existing_conversation_or_changed_persona(self):
+        initial = {**self.env, 'cid': ''}
+        add_material(self.plugin.store, initial, 'user', 'first', self.at, 'first')
+        saved = copy.deepcopy(self.plugin.store.data['diary_chat'])
+        for original, current in [(self.env, {**self.env, 'cid': 'reset'}),
+                                  (initial, {**self.env, 'persona': {**self.persona, 'key': 'changed'}}),
+                                  (initial, {**self.env, 'umo': 'test:FriendMessage:other'})]:
+            self.assertFalse(bind_initial_material(self.plugin.store, original, current, 'first'))
+        self.assertEqual(self.plugin.store.data['diary_chat'], saved)
+
+    async def test_failed_material_write_can_retry_without_duplicate_or_lost_marker(self):
+        before = copy.deepcopy(self.plugin.store.data['diary_chat'])
+        with patch.object(self.plugin.store, 'save', side_effect=OSError('disk fixture')):
+            with self.assertRaises(OSError):
+                add_material(self.plugin.store, self.env, 'user', '可重试文本', self.at, 'retry')
+        self.assertEqual(self.plugin.store.data['diary_chat'], before)
+        self.assertTrue(add_material(self.plugin.store, self.env, 'user', '可重试文本', self.at, 'retry'))
+        self.assertEqual(self.material()['message_count'], 1)
+
+    async def test_failed_binding_save_restores_original_identity(self):
+        initial = {**self.env, 'cid': ''}
+        add_material(self.plugin.store, initial, 'user', 'first', self.at, 'first')
+        before = copy.deepcopy(self.plugin.store.data['diary_chat'])
+        with patch.object(self.plugin.store, 'save', side_effect=OSError('disk fixture')):
+            with self.assertRaises(OSError):
+                bind_initial_material(self.plugin.store, initial, self.env, 'first')
+        self.assertEqual(self.plugin.store.data['diary_chat'], before)
+        self.assertTrue(bind_initial_material(self.plugin.store, initial, self.env, 'first'))
+
+    async def test_binding_preserves_session_day_limit_and_omission_count(self):
+        initial = {**self.env, 'cid': ''}
+        with patch('astrbot_plugin_persona_schedule.diary_context.MAX_PER_SESSION_DAY', 2):
+            add_material(self.plugin.store, initial, 'user', 'oldest', self.at, 'first')
+            add_material(self.plugin.store, self.env, 'user', 'recent', self.at + 1, 'second')
+            add_material(self.plugin.store, self.env, 'user', 'latest', self.at + 2, 'third')
+            self.assertTrue(bind_initial_material(self.plugin.store, initial, self.env, 'first'))
+        material = self.material()
+        self.assertEqual([r['text'] for r in material['messages']], ['recent', 'latest'])
+        self.assertEqual(material['omitted_count'], 1)
+
+    async def test_diary_page_counts_use_saved_day_timezone_after_profile_change(self):
+        record = self.plugin.store.data['personas'][self.persona['id']]
+        record['profile']['timezone'] = 'Asia/Tokyo'
+        late = datetime.fromisoformat(self.day + 'T23:30:00').replace(tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()
+        await self.capture('上海午夜前，东京已经次日', at=late)
+        viewed = await self.plugin.web_diary({'persona_id': self.persona['id'], 'date': self.day})
+        self.assertEqual(viewed['chat_material']['message_count'], 1)
+        archived = await self.plugin.ensure_diary(self.persona, self.day, UMO)
+        self.assertEqual(archived['source']['chat_context'], viewed['chat_material'])
+        self.assertEqual(archived['timezone'], 'Asia/Shanghai')
+        record['days'].pop(self.day)
+        archived_view = await self.plugin.web_diary({'persona_id': self.persona['id'], 'date': self.day})
+        self.assertEqual(archived_view['chat_material'], viewed['chat_material'])

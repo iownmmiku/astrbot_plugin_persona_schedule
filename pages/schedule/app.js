@@ -21,7 +21,7 @@ let state = null, detail = {}, tab = 'today', selected = new Set(), dirty = fals
 let dirtyKinds = new Set();
 let diary = null, diaryLoading = 0, autoPersonas = new Set();
 let detailSelection = null, detailLoading = false, saving = false, followRoleToday = true;
-let recurrenceData = null, recurrenceDraft = [], recurrenceDirty = false, recurrenceLoading = 0, recurrenceEdit = null;
+let recurrenceData = null, recurrenceDraft = [], recurrenceDirty = false, recurrenceLoading = 0, recurrenceFetching = false, recurrenceEdit = null;
 let historyData = null, historyLoading = 0, previewData = null, previewLoading = 0, previewBusy = false;
 function hasPersonaDraft() {return dirty || recurrenceDirty;}
 function renderDraftStatus() { $('draft-status').textContent = hasPersonaDraft() || dirtySettings ? '● 有未保存的修改' : ''; }
@@ -63,8 +63,8 @@ function setGenerationBusy(busy) {
   $('generate-diary').disabled = !editable || !diary?.can_generate;
   $('diary-latest').disabled = locked || !diary?.entries?.length;
   document.querySelectorAll('[data-diary-date]').forEach(el=>el.disabled=locked);
-  document.querySelectorAll('#add-recurrence,#save-recurrences,[data-rule-edit],[data-rule-delete],#recurrence-form input,#recurrence-form select,#recurrence-form textarea,#recurrence-form button[type="submit"]').forEach(el=>el.disabled=!editable || !recurrenceMatchesSelection());
-  $('refresh-recurrences').disabled=locked;
+  document.querySelectorAll('#add-recurrence,#save-recurrences,[data-rule-edit],[data-rule-delete],#recurrence-form input,#recurrence-form select,#recurrence-form textarea,#recurrence-form button[type="submit"]').forEach(el=>el.disabled=!editable || recurrenceFetching || !recurrenceMatchesSelection());
+  $('refresh-recurrences').disabled=locked || recurrenceFetching;
   document.querySelectorAll('#preview-run,#preview-model').forEach(el=>el.disabled=locked||previewBusy||!detailMatchesSelection());
   $('refresh-history').disabled=locked;
   document.querySelectorAll('[data-restore]').forEach(el=>el.disabled=locked||el.dataset.restorable!=='true');
@@ -366,7 +366,8 @@ async function loadDetail({followToday=false} = {}) {
     detail=data;detailSelection=selection;$('persona').value=selection.personaId;$('date').value=selection.date;
     syncPersonaTools(selection);
     diary=null;dirty=false;dirtyKinds.clear();renderDraftStatus();calendarMonth=selection.date.slice(0,7);renderDetail();recoverJob();
-    if(tab==='diary')await loadDiary();
+    // Auxiliary panels must not turn a committed detail refresh into a failure.
+    if(tab==='diary')action(loadDiary);
     if(tab==='calendar')action(()=>loadRecurrences());
     if(tab==='workbench'){renderPreviewSessions();action(loadHistory);}
     return true;
@@ -416,16 +417,25 @@ $('diary-search').oninput=renderDiary;
 $('diary-list').addEventListener('click',event=>{const button=event.target.closest('[data-diary-date]');if(button)action(()=>chooseDate(button.dataset.diaryDate));});
 $('diary-latest').onclick=()=>action(()=>chooseDate(diary.entries[0].date));
 function syncPersonaTools(selection) {
-  if(recurrenceData?.persona_id!==selection.personaId){recurrenceData=null;recurrenceDraft=[];recurrenceDirty=false;recurrenceLoading++;renderRecurrences();}
+  if(recurrenceData?.persona_id!==selection.personaId){recurrenceData=null;recurrenceDraft=[];recurrenceDirty=false;recurrenceLoading++;recurrenceFetching=false;renderRecurrences();}
   if(historyData?.persona_id!==selection.personaId){historyData=null;historyLoading++;renderHistory();}
-  if(previewData?.persona_id!==selection.personaId||previewData?.date!==selection.date){previewData=null;previewLoading++;previewBusy=false;renderPreview();}
+  // Saving, restoring or regenerating can change the same persona/date too.
+  previewData=null;previewLoading++;previewBusy=false;renderPreview();
   renderDraftStatus();
 }
 function recurrenceMatchesSelection() {return recurrenceData?.persona_id===$('persona').value;}
+function requireRecurrenceReady() {
+  requireDetailReady();
+  if(recurrenceFetching)throw new Error('重复规则正在读取，请稍后再编辑。');
+  if(!recurrenceMatchesSelection())throw new Error('请先加载当前人设的重复规则。');
+}
 async function loadRecurrences({force=false}={}) {
-  const pid=$('persona').value,ticket=++recurrenceLoading;
-  if(!pid){recurrenceData=null;recurrenceDraft=[];recurrenceDirty=false;renderRecurrences();return;}
+  if($('recurrence-editor').open){if(force)throw new Error('请先关闭重复规则编辑窗口，再刷新。');return;}
+  const pid=$('persona').value;
+  if(!pid){recurrenceLoading++;recurrenceData=null;recurrenceDraft=[];recurrenceDirty=false;recurrenceFetching=false;renderRecurrences();return;}
   if(recurrenceMatchesSelection()&&recurrenceDirty&&!force){renderRecurrences();return;}
+  const ticket=++recurrenceLoading;
+  recurrenceFetching=true;setGenerationBusy(generating);
   $('recurrence-status').textContent='正在读取重复规则…';
   try {
     const data=await api('GET','recurrences',{persona_id:pid,date:$('date').value});
@@ -433,7 +443,7 @@ async function loadRecurrences({force=false}={}) {
     if(data.persona_id!==pid)throw new Error('重复规则的人设不匹配，请重新加载。');
     recurrenceData=data;recurrenceDraft=structuredClone(data.rules || []);recurrenceDirty=false;renderRecurrences();renderDraftStatus();
   } catch(error){if(ticket!==recurrenceLoading||pid!==$('persona').value)return;$('recurrence-status').textContent='重复规则加载失败：'+(error.message || '请重试');throw error;}
-  finally {setGenerationBusy(generating);}
+  finally {if(ticket===recurrenceLoading)recurrenceFetching=false;setGenerationBusy(generating);}
 }
 function renderRecurrences() {
   $('recurrence-count').textContent=`${recurrenceDraft.length} 项`;
@@ -442,7 +452,7 @@ function renderRecurrences() {
   setGenerationBusy(generating);
 }
 function openRecurrence(index=-1) {
-  requireDetailReady();if(!recurrenceMatchesSelection())throw new Error('请先加载当前人设的重复规则。');
+  requireRecurrenceReady();
   const row=index>=0?recurrenceDraft[index]:{title:'',kind:'anniversary',calendar:'gregorian',month:Number($('date').value.slice(5,7)),day:Number($('date').value.slice(8)),duration_days:1,leap_policy:'skip',enabled:true};
   if(!row)throw new Error('规则已变化，请重新打开。');
   recurrenceEdit={index,personaId:$('persona').value};
@@ -452,7 +462,7 @@ function openRecurrence(index=-1) {
 }
 function renderRuleMapping() {$('rule-mapping-label').hidden=$('rule-calendar').value!=='fictional';$('rule-mapping').required=$('rule-calendar').value==='fictional';}
 function applyRecurrence() {
-  requireDetailReady();if(recurrenceEdit?.personaId!==$('persona').value||!recurrenceMatchesSelection())throw new Error('人设已变化，请关闭编辑后重试。');
+  requireRecurrenceReady();if(recurrenceEdit?.personaId!==$('persona').value)throw new Error('人设已变化，请关闭编辑后重试。');
   const old=recurrenceDraft[recurrenceEdit.index] || {},row={...old,title:$('rule-title').value.trim(),kind:$('rule-kind').value,calendar:$('rule-calendar').value,month:Number($('rule-month').value),day:Number($('rule-day').value),duration_days:Number($('rule-duration').value),leap_policy:$('rule-leap').value,mapping:$('rule-mapping').value.trim(),description:$('rule-description').value.trim(),day_off:$('rule-day-off').checked,enabled:$('rule-enabled').checked};
   if(!row.title)throw new Error('请填写名称。');
   if(!Number.isInteger(row.month)||row.month<1||row.month>12||!Number.isInteger(row.day)||row.day<1||row.day>new Date(Date.UTC(2000,row.month,0)).getUTCDate())throw new Error('请填写有效的月份和日期。');
@@ -464,10 +474,10 @@ function applyRecurrence() {
   recurrenceDirty=true;renderDraftStatus();renderRecurrences();$('recurrence-editor').close();notice('规则已加入草稿，请保存重复纪念日。');
 }
 async function saveRecurrences() {
-  requireDetailReady();if(!recurrenceMatchesSelection())throw new Error('请先加载当前人设的重复规则。');
+  requireRecurrenceReady();
   const pid=$('persona').value;
   if(!await askConfirm('保存重复规则会更新年度活动，相关生成日程可能需要重新生成；手工时段保留。继续？'))return;
-  requireDetailReady();if(pid!==$('persona').value||!recurrenceMatchesSelection())throw new Error('人设已变化，请重新确认。');const rules=structuredClone(recurrenceDraft),pending=[...dirtyKinds],draft=structuredClone(detail);
+  requireRecurrenceReady();if(pid!==$('persona').value)throw new Error('人设已变化，请重新确认。');const rules=structuredClone(recurrenceDraft),pending=[...dirtyKinds],draft=structuredClone(detail);
   saving=true;setGenerationBusy(generating);
   try {await api('POST','recurrences-save',{persona_id:pid,rules});recurrenceDirty=false;await loadRecurrences({force:true});await loadDetail();
     for(const kind of pending){if(kind==='calendar'&&draft.calendar){const recurring=(detail.calendar?.events || []).filter(row=>row.origin==='recurring'||row.recurrence_id);detail.calendar={...draft.calendar,events:[...draft.calendar.events.filter(row=>row.origin!=='recurring'&&!row.recurrence_id),...recurring]};}else detail[kind]=draft[kind];markDirty(kind);}if(pending.length)renderDetail();
@@ -481,10 +491,10 @@ $('rule-calendar').onchange=renderRuleMapping;
 for(const id of ['close-recurrence','cancel-recurrence'])$(id).onclick=()=>$('recurrence-editor').close();
 $('recurrence-form').onsubmit=event=>{event.preventDefault();try {applyRecurrence();}catch(error){$('recurrence-error').textContent=error.message;}};
 $('recurrence-list').addEventListener('click',event=>action(async()=>{
-  if(controlsLocked()||!recurrenceMatchesSelection())return;
+  if(controlsLocked()||recurrenceFetching||!recurrenceMatchesSelection())return;
   const edit=event.target.closest('[data-rule-edit]'),del=event.target.closest('[data-rule-delete]');
   if(edit)openRecurrence(Number(edit.dataset.ruleEdit));
-  if(del&&await askConfirm('从草稿中删除这项重复规则？保存后生效。')){requireDetailReady();recurrenceDraft.splice(Number(del.dataset.ruleDelete),1);recurrenceDirty=true;renderDraftStatus();renderRecurrences();}
+  if(del&&await askConfirm('从草稿中删除这项重复规则？保存后生效。')){requireRecurrenceReady();recurrenceDraft.splice(Number(del.dataset.ruleDelete),1);recurrenceDirty=true;renderDraftStatus();renderRecurrences();}
 }));
 function renderPreviewSessions() {
   const previous=$('preview-session').value;

@@ -76,7 +76,7 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancellation_preserves_existing_diary(self):
         entry = copy.deepcopy(await self.write())
         started = asyncio.Event()
-        async def blocked(*args):
+        async def blocked(*args, **kwargs):
             started.set()
             await asyncio.Event().wait()
         self.plugin.generator.diary = blocked
@@ -142,6 +142,31 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
         reloaded = Store(self.temp.name)
         self.assertEqual(reloaded.data['diaries']['traveler'][self.day], entry)
 
+    async def test_failed_archive_write_does_not_cache_unsaved_diary(self):
+        before_logs = copy.deepcopy(self.plugin.store.data['logs'])
+        with patch.object(self.plugin.store, 'save', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                await self.write()
+        self.assertNotIn(self.day, self.plugin.store.data['diaries']['traveler'])
+        self.assertEqual(self.plugin.store.data['logs'], before_logs)
+        self.assertNotIn(self.day, Store(self.temp.name).data['diaries'].get('traveler', {}))
+        await self.write()
+        self.assertEqual(len(self.ctx.calls), 2)
+
+    async def test_failed_rewrite_rolls_back_retention_and_old_content(self):
+        entry = copy.deepcopy(await self.write())
+        entries = self.plugin.store.data['diaries']['traveler']
+        for number in range(1, 9):
+            entries[f'2020-01-{number:02}'] = {**entry, 'date': f'2020-01-{number:02}'}
+        self.plugin.store.settings['diary_limit'] = 7
+        self.plugin.store.save()
+        before = copy.deepcopy(self.plugin.store.data)
+        with patch.object(self.plugin.store, 'save', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                await self.write(force=True)
+        self.assertEqual(self.plugin.store.data, before)
+        self.assertEqual(Store(self.temp.name).data['diaries'], before['diaries'])
+
     async def test_persona_change_preserves_history_and_marks_old_identity(self):
         await self.write()
         self.ctx.persona_manager.item['system_prompt'] = '人设已改变'
@@ -151,7 +176,7 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(self.day, self.plugin.store.data['diaries']['traveler'])
 
     async def test_source_change_during_generation_discards_stale_result(self):
-        async def changed(*args):
+        async def changed(*args, **kwargs):
             self.plugin.store.data['personas']['traveler']['days'][self.day]['summary'] = '新安排'
             return {'title':'old', 'content':'stale', 'mood':''}
         self.plugin.generator.diary = changed
@@ -160,7 +185,7 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.day, self.plugin.store.data['diaries']['traveler'])
 
     async def test_prompt_change_during_generation_discards_result(self):
-        async def changed(*args):
+        async def changed(*args, **kwargs):
             self.ctx.persona_manager.item['system_prompt'] = '新的角色'
             return {'title':'old','content':'stale','mood':''}
         self.plugin.generator.diary = changed
@@ -294,7 +319,7 @@ class DiaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabling_during_auto_generation_does_not_commit(self):
         self.plugin.store.settings['enabled'] = True
-        async def disabled(*args):
+        async def disabled(*args, **kwargs):
             self.plugin.store.settings['diary_enabled'] = False
             return {'title':'no', 'content':'no', 'mood':''}
         self.plugin.generator.diary = disabled

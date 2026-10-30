@@ -204,19 +204,30 @@ class Generator:
             raise ValueError("请先在 AstrBot 配置聊天模型，或在插件设置中选择模型")
         return provider.meta().id
 
-    async def generate(self, system, payload, umo="", *, contexts=None, purpose="schedule"):
-        provider_id = await self.provider_id(umo, purpose=purpose)
-        response = await asyncio.wait_for(self.context.llm_generate(
-            chat_provider_id=provider_id, system_prompt=system,
-            prompt=json.dumps(payload, ensure_ascii=False), contexts=contexts or []),
-            self.store.settings["timeout_seconds"])
+    async def generate(self, system, payload, umo="", *, contexts=None, purpose="schedule", before_generate=None):
+        async def invoke():
+            provider_id = await self.provider_id(umo, purpose=purpose)
+            if before_generate:
+                checked = before_generate()
+                if inspect.isawaitable(checked):
+                    await checked
+            # Keep the final guard and provider invocation in the same task;
+            # wait_for scheduling must not open another revocation window.
+            return await self.context.llm_generate(
+                chat_provider_id=provider_id, system_prompt=system,
+                prompt=json.dumps(payload, ensure_ascii=False), contexts=contexts or [])
+        response = await asyncio.wait_for(invoke(), self.store.settings["timeout_seconds"])
         return field(response, "completion_text", "") or ""
 
-    async def structured(self, instruction, payload, validator, umo="", *, purpose="schedule"):
+    async def structured(self, instruction, payload, validator, umo="", *, purpose="schedule", before_generate=None):
         data = dict(payload)
         for attempt in range(2):
+            # Only malformed model output is repairable. A guard/provider error
+            # must propagate without retrying or including its text in a prompt.
+            output = await self.generate(SYSTEM + instruction, data, umo, purpose=purpose,
+                                         before_generate=before_generate)
             try:
-                return validator(parse_object(await self.generate(SYSTEM + instruction, data, umo, purpose=purpose)))
+                return validator(parse_object(output))
             except (ValueError, TypeError, KeyError) as exc:
                 if attempt:
                     raise ValueError("模型两次未生成有效数据，请在 WebUI 重试或手动编辑") from exc
@@ -270,10 +281,11 @@ class Generator:
             lambda obj: {"summary": str(obj.get("summary", ""))[:1000], "slots": validate_slots(obj.get("slots"))}, umo)
         return {"date": day, "timezone": profile["timezone"], "events": events, **data, "origin": "generated", "revision": 1}
 
-    async def diary(self, persona, profile, schedule, recent, umo=""):
+    async def diary(self, persona, profile, schedule, recent, umo="", *, before_generate=None):
         return await self.structured(DIARY, {"date": schedule["date"], "persona": persona["prompt"],
             "profile": {k: v for k, v in profile.items() if k != "weekly"},
-            "saved_day": schedule, "recent_diaries": recent}, validate_diary, umo, purpose="diary")
+            "saved_day": schedule, "recent_diaries": recent}, validate_diary, umo, purpose="diary",
+            before_generate=before_generate)
 
     async def adaptive(self, persona, profile, schedule, target, message, contexts, umo="", *,
                        remaining_minutes=None, active_conversation=False):

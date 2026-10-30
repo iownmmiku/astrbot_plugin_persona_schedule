@@ -41,27 +41,30 @@ def _bucket(row):
     return digest([row["umo"], row["cid"], row["persona_id"], row["persona_key"], row["day"]])
 
 
-def add_material(store, env, role, value, now, token):
-    if not chat_enabled(store.settings, env["umo"]) or role not in {"user", "assistant"}:
-        return False
-    if not isinstance(value, str) or not value.strip():
-        return False
-    prune_materials(store, now)
-    materials = store.data.setdefault("diary_chat", {"messages": [], "dropped": {}})
+def _identifier(env, role, token):
+    return digest([env["umo"], env["cid"], env["persona"]["key"], role, token])
+
+
+def _copy_materials(value):
+    # Rows are immutable except for the explicitly replaced first-chat row.
+    return {"messages": list(value.get("messages", [])),
+            "dropped": {key: dict(row) for key, row in value.get("dropped", {}).items()}}
+
+
+def _save_materials(store, materials, previous):
+    store.data["diary_chat"] = materials
+    try:
+        store.save()
+    except Exception:
+        if previous is None:
+            store.data.pop("diary_chat", None)
+        else:
+            store.data["diary_chat"] = previous
+        raise
+
+
+def _limit_materials(materials, row):
     rows = materials["messages"]
-    identifier = digest([env["umo"], env["cid"], env["persona"]["key"], role, token])
-    if any(row["id"] == identifier for row in rows):
-        return False
-    record = store.data["personas"].get(env["persona"]["id"], {})
-    profile = record.get("profile") if record.get("key") == env["persona"]["key"] else None
-    tz = (profile or {}).get("timezone", store.settings["timezone"])
-    local = datetime.fromtimestamp(now, ZoneInfo(tz))
-    value = value.strip()
-    row = {"id": identifier, "at": now, "umo": env["umo"], "cid": env["cid"],
-           "persona_id": env["persona"]["id"], "persona_key": env["persona"]["key"],
-           "day": local.date().isoformat(), "timezone": tz, "role": role,
-           "text": value[:MAX_TEXT], "truncated": len(value) > MAX_TEXT}
-    rows.append(row)
     bucket = _bucket(row)
     same = [r for r in rows if _bucket(r) == bucket]
     removed = same[:-MAX_PER_SESSION_DAY]
@@ -75,7 +78,59 @@ def add_material(store, env, role, value, now, token):
         counter = materials["dropped"].setdefault(key, {k: old[k] for k in ("at", "umo", "persona_id", "persona_key", "day")})
         counter["count"] = counter.get("count", 0) + 1
     materials["dropped"] = dict(list(materials["dropped"].items())[-MAX_MESSAGES:])
-    store.save()
+
+
+def add_material(store, env, role, value, now, token):
+    if not chat_enabled(store.settings, env["umo"]) or role not in {"user", "assistant"}:
+        return False
+    if not isinstance(value, str) or not value.strip():
+        return False
+    previous = store.data.get("diary_chat")
+    prune_materials(store, now)
+    materials = _copy_materials(store.data.get("diary_chat", {}))
+    rows = materials["messages"]
+    identifier = _identifier(env, role, token)
+    if any(row["id"] == identifier for row in rows):
+        return False
+    record = store.data["personas"].get(env["persona"]["id"], {})
+    profile = record.get("profile") if record.get("key") == env["persona"]["key"] else None
+    tz = (profile or {}).get("timezone", store.settings["timezone"])
+    local = datetime.fromtimestamp(now, ZoneInfo(tz))
+    value = value.strip()
+    row = {"id": identifier, "at": now, "umo": env["umo"], "cid": env["cid"],
+           "persona_id": env["persona"]["id"], "persona_key": env["persona"]["key"],
+           "day": local.date().isoformat(), "timezone": tz, "role": role,
+           "text": value[:MAX_TEXT], "truncated": len(value) > MAX_TEXT}
+    rows.append(row)
+    _limit_materials(materials, row)
+    _save_materials(store, materials, previous)
+    return True
+
+
+def bind_initial_material(store, original, current, token):
+    """Bind one initial input after AstrBot creates its first conversation.
+
+    The caller must verify the request's conversation against the current SDK
+    environment. Existing conversation IDs can never be rebound after reset.
+    """
+    if (original["cid"] or not current["cid"]
+            or not chat_enabled(store.settings, current["umo"])
+            or (original["umo"], original["persona"]["id"], original["persona"]["key"])
+            != (current["umo"], current["persona"]["id"], current["persona"]["key"])):
+        return False
+    previous = store.data.get("diary_chat", {})
+    old_id = _identifier(original, "user", token)
+    new_id = _identifier(current, "user", token)
+    rows = previous.get("messages", [])
+    source = next((row for row in rows if row["id"] == old_id), None)
+    if (source is None or source["at"] <= time.time() - RETENTION_SECONDS
+            or any(row["id"] == new_id for row in rows)):
+        return False
+    materials = _copy_materials(previous)
+    rebound = {**source, "id": new_id, "cid": current["cid"]}
+    materials["messages"] = [rebound if row["id"] == old_id else row for row in rows]
+    _limit_materials(materials, rebound)
+    _save_materials(store, materials, previous)
     return True
 
 

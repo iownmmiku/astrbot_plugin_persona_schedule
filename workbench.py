@@ -122,6 +122,9 @@ class WorkbenchMixin:
         persona = await self._persona(str(payload.get("persona_id", "")))
         snapshot_id = str(payload.get("id", ""))
         async with self._lock(self.persona_locks, persona["id"]):
+            # A generation job may hold the lock while the user edits the
+            # official persona. Never restore an old identity after that wait.
+            await self._require_current_persona(persona)
             entry = next((entry for entry in self.store.data.get("edit_history", {}).get(persona["id"], [])
                           if entry["id"] == snapshot_id), None)
             if entry is None:

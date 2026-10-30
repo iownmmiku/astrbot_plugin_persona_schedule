@@ -317,13 +317,13 @@ async def run_smoke(isolation: Path):
         assert blocked_proactive["status"] == "busy" and blocked_proactive["cid"] == cid
         assert not recording.sent and not plugin.store.data["queues"]
 
-        def event(text):
+        def event(text, session_id="smoke-user"):
             message = AstrBotMessage()
             message.type = MessageType.FRIEND_MESSAGE
-            message.self_id, message.session_id, message.message_id = "smoke-bot", "smoke-user", str(time.time_ns())
-            message.sender = MessageMember(user_id="smoke-user", nickname="Offline user")
+            message.self_id, message.session_id, message.message_id = "smoke-bot", session_id, str(time.time_ns())
+            message.sender = MessageMember(user_id=session_id, nickname="Offline user")
             message.message, message.message_str, message.raw_message = [Plain(text)], text, {}
-            return AstrMessageEvent(text, message, recording.meta(), "smoke-user")
+            return AstrMessageEvent(text, message, recording.meta(), session_id)
 
         # Resolve and execute the real built-in reset handler using the SDK's
         # waking + plugin-dispatch stages. All writes stay in isolated SQLite;
@@ -522,6 +522,49 @@ async def run_smoke(isolation: Path):
         assert len((await request_api("history", payload={"persona_id":persona["id"]}))["entries"]) >= 2
         checks.append("real snapshot save/history/restore endpoints preserve schedule and retain undo of restore")
 
+        # Use the official PersonaManager/SQLite edit API while both operations
+        # wait for the same generation lock. Only the timing signal is wrapped;
+        # persona reads and writes use the actual SDK throughout this check.
+        from unittest.mock import patch
+        persona_lock = plugin._lock(plugin.persona_locks, persona["id"])
+        await persona_lock.acquire()
+        original_lookup = plugin._persona
+        looked_up, lookup_count = asyncio.Event(), 0
+
+        async def observed_lookup(pid):
+            nonlocal lookup_count
+            result = await original_lookup(pid)
+            lookup_count += 1
+            if lookup_count == 2:
+                looked_up.set()
+            return result
+
+        before_identity_edit = copy.deepcopy(plugin.store.data)
+        disk_before_identity_edit = plugin.store.path.read_bytes()
+        tasks = []
+        try:
+            with patch.object(plugin, "_persona", side_effect=observed_lookup):
+                tasks = [asyncio.create_task(plugin.web_save({"persona_id":persona["id"],
+                    "date":day, "kind":"day", "value":changed_day})),
+                    asyncio.create_task(plugin.web_restore({"persona_id":persona["id"], "id":saved["snapshot_id"]}))]
+                await asyncio.wait_for(looked_up.wait(), 5)
+                await personas.update_persona(persona["id"], system_prompt="官方编辑后的新旅人身份。")
+                assert (await original_lookup(persona["id"]))["key"] != persona["key"]
+                persona_lock.release()
+                outcomes = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+                assert all(isinstance(outcome, ValueError) and "人设已变化" in str(outcome) for outcome in outcomes)
+            assert plugin.store.data == before_identity_edit
+            assert plugin.store.path.read_bytes() == disk_before_identity_edit
+        finally:
+            if persona_lock.locked():
+                persona_lock.release()
+            for pending in tasks:
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await personas.update_persona(persona["id"], system_prompt=persona["prompt"])
+        checks.append("real PersonaManager edit while save/restore wait for persona lock rejects stale identity and preserves disk/state")
+
         rule = {"title":"旅人的跨年纪念", "calendar":"fictional", "mapping":"设定霜月末日映射公历12月31日",
             "month":12, "day":31, "duration_days":3, "kind":"anniversary"}
         await request_api("recurrences-save", "POST", {"persona_id":persona["id"], "rules":[rule]})
@@ -547,6 +590,45 @@ async def run_smoke(isolation: Path):
         await request_api("settings", "POST", {"whitelist":[]})
         assert not plugin.store.data["diary_chat"]["messages"] and material_archive["source"]["chat_context"]["message_count"] == 2
         checks.append("real event and LLMResponse whitelist journal materials, bounded metadata-only archive and revocation cleanup")
+
+        # AstrBot creates the first SQLite conversation after message capture.
+        # The real ProviderRequest is the authority for binding that one input;
+        # a later reset must not attach an old model response to the new chat.
+        from astrbot_plugin_persona_schedule.diary_context import select_materials
+        first_session = "smoke-first-contact"
+        first_umo = f"offline_smoke:FriendMessage:{first_session}"
+        await sp.put_async(scope="umo", scope_id=first_umo, key="session_service_config",
+                           value={"persona_id":persona["id"]})
+        await request_api("settings", "POST", {"whitelist":[first_umo], "diary_chat_enabled":True,
+                                                "whitelist_enabled":False, "all_chats_enabled":False})
+        assert not await conversations.get_curr_conversation_id(first_umo)
+        first_event = event("初次见面，我们来聊聊今天的旅行。", first_session)
+        await plugin.capture_diary_input(first_event)
+        marker = first_event.get_extra(NAME + ":diary_capture")
+        assert marker and not marker["env"]["cid"]
+        first_cid = await conversations.new_conversation(first_umo, title="Initial diary binding", persona_id=persona["id"])
+        first_conversation = await conversations.get_conversation(first_umo, first_cid)
+        first_request = ProviderRequest(prompt=first_event.message_str, conversation=first_conversation)
+        await plugin.inject_schedule(first_event, first_request)
+        assert not first_event.is_stopped()
+        await plugin.capture_diary_response(first_event, LLMResponse(role="assistant", completion_text="今天的旅途很平静。"))
+        material_rows = plugin.store.data["diary_chat"]["messages"]
+        assert len(material_rows) == 2 and {row["cid"] for row in material_rows} == {first_cid}
+        assert [row["role"] for row in material_rows] == ["user", "assistant"]
+        first_day = datetime.fromtimestamp(material_rows[0]["at"], ZoneInfo("Asia/Shanghai")).date().isoformat()
+        bound_material = select_materials(plugin.store, persona, first_day, "Asia/Shanghai")
+        assert bound_material["message_count"] == 2 and bound_material["conversation_count"] == 1
+        before_late_reply = copy.deepcopy(plugin.store.data["diary_chat"])
+        first_reset = event("/reset", first_session)
+        await waking.process(first_reset)
+        async for _ in dispatch.process(first_reset):
+            pass
+        assert await conversations.get_curr_conversation_id(first_umo) != first_cid
+        await plugin.capture_diary_response(first_event, LLMResponse(role="assistant", completion_text="这是重置前迟到的旧回复。"))
+        assert plugin.store.data["diary_chat"] == before_late_reply
+        assert (await conversations.get_conversation(first_umo, first_cid)).history == first_conversation.history
+        await request_api("settings", "POST", {"whitelist":[], "all_chats_enabled":True})
+        checks.append("real initial empty-CID event binds through ProviderRequest conversation; user/assistant share one journal chat and reset excludes late reply")
 
         await plugin.initialize()
         await asyncio.sleep(0.05)

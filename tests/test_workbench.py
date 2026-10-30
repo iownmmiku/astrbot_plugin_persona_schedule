@@ -1,6 +1,7 @@
 """Exercise real preview/save/restore handlers without models or platform sends."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import tempfile
 import unittest
@@ -305,6 +306,62 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.store.data["personas"]["traveler"]["days"][DAY]["summary"], "first edit")
         self.assertEqual(self.plugin.store.data["queues"], queue)
         self.assertEqual(self.plugin.store.data["diaries"], diaries)
+
+    async def test_restore_waiting_for_lock_rechecks_official_persona(self):
+        saved = await self.save_day("keep this edit")
+        lock = self.plugin._lock(self.plugin.persona_locks, self.persona["id"])
+        await lock.acquire()
+        looked_up = asyncio.Event()
+        original_persona = self.plugin._persona
+
+        async def observed_persona(pid):
+            value = await original_persona(pid)
+            looked_up.set()
+            return value
+
+        with patch.object(self.plugin, "_persona", side_effect=observed_persona):
+            pending = asyncio.create_task(self.plugin.web_restore(
+                {"persona_id": "traveler", "id": saved["snapshot_id"]}))
+            try:
+                await asyncio.wait_for(looked_up.wait(), 1)
+                self.context.persona_manager.item["system_prompt"] = "新的角色身份"
+                before, disk = copy.deepcopy(self.plugin.store.data), self.plugin.store.path.read_bytes()
+            finally:
+                lock.release()
+            with self.assertRaisesRegex(ValueError, "人设已变化"):
+                await pending
+        self.assertEqual(self.plugin.store.data, before)
+        self.assertEqual(self.plugin.store.path.read_bytes(), disk)
+
+    async def test_restore_waiting_for_lock_does_not_overwrite_new_identity_record(self):
+        saved = await self.save_day()
+        lock = self.plugin._lock(self.plugin.persona_locks, self.persona["id"])
+        await lock.acquire()
+        looked_up = asyncio.Event()
+        original_persona = self.plugin._persona
+
+        async def observed_persona(pid):
+            value = await original_persona(pid)
+            looked_up.set()
+            return value
+
+        with patch.object(self.plugin, "_persona", side_effect=observed_persona):
+            pending = asyncio.create_task(self.plugin.web_restore(
+                {"persona_id": "traveler", "id": saved["snapshot_id"]}))
+            try:
+                await asyncio.wait_for(looked_up.wait(), 1)
+                self.context.persona_manager.item["system_prompt"] = "新的角色身份"
+                changed_persona = await original_persona("traveler")
+                self.plugin.store.data["personas"]["traveler"] = {
+                    **copy.deepcopy(self.record), "key": changed_persona["key"], "recurrences": []}
+                self.plugin.store.save()
+                before, disk = copy.deepcopy(self.plugin.store.data), self.plugin.store.path.read_bytes()
+            finally:
+                lock.release()
+            with self.assertRaisesRegex(ValueError, "人设已变化"):
+                await pending
+        self.assertEqual(self.plugin.store.data, before)
+        self.assertEqual(self.plugin.store.path.read_bytes(), disk)
 
     async def test_snapshot_survives_restart_and_is_bounded(self):
         for index in range(23):

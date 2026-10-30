@@ -354,3 +354,65 @@ test('diary whitelist remains explicitly visible when controlling every conversa
   assert.match(h.element('diary-whitelist-status').textContent,/白名单为空/);
   h.element('diary-chat-enabled').checked=false;h.ui.renderChatScope();assert.equal(h.element('whitelist-selection').hidden,true);
 });
+
+test('an in-flight recurring refresh blocks edits until its saved rules are loaded', async()=>{
+  const response=deferred(),h=harness(()=>response.promise);
+  h.context.rule=recurringRule;
+  h.run("recurrenceData={persona_id:'A',rules:[rule]};recurrenceDraft=[rule];");
+  const pending=h.ui.loadRecurrences({force:true});
+  assert.equal(h.element('add-recurrence').disabled,true);
+  assert.equal(h.element('save-recurrences').disabled,true);
+  assert.throws(()=>h.ui.openRecurrence(0),/读取|加载|稍后/);
+  await assert.rejects(h.ui.saveRecurrences(),/读取|加载|稍后/);
+  assert.equal(h.calls.filter(c=>c.method==='POST').length,0);
+  response.resolve({persona_id:'A',rules:[{...recurringRule,title:'已保存的规则'}]});await pending;
+  assert.equal(h.element('add-recurrence').disabled,false);
+  h.ui.openRecurrence(0);assert.equal(h.element('rule-title').value,'已保存的规则');
+});
+
+test('a failed recurring refresh preserves the current rules and unlocks editing', async()=>{
+  const h=harness(async()=>{throw new Error('rules unavailable');});h.context.rule=recurringRule;
+  h.run("recurrenceData={persona_id:'A',rules:[rule]};recurrenceDraft=[rule];");
+  await assert.rejects(h.ui.loadRecurrences({force:true}),/rules unavailable/);
+  assert.equal(h.element('add-recurrence').disabled,false);
+  assert.equal(h.snapshot().recurrenceDraft[0].title,recurringRule.title);
+});
+
+test('reentering the calendar cannot cancel a confirmed refresh of a dirty rule draft', async()=>{
+  const response=deferred(),h=harness(()=>response.promise);h.context.rule=recurringRule;
+  h.run("recurrenceData={persona_id:'A',rules:[rule]};recurrenceDraft=[rule];recurrenceDirty=true;");
+  const pending=h.ui.loadRecurrences({force:true});await h.ui.loadRecurrences();
+  response.resolve({persona_id:'A',rules:[{...recurringRule,title:'重新读取的规则'}]});await pending;
+  assert.equal(h.snapshot().recurrenceDirty,false);
+  assert.equal(h.snapshot().recurrenceDraft[0].title,'重新读取的规则');
+  assert.equal(h.element('add-recurrence').disabled,false);
+});
+
+test('reloading recurring rules does not replace a rule currently open in the editor', async()=>{
+  const h=harness();h.context.rule=recurringRule;
+  h.run("recurrenceData={persona_id:'A',rules:[rule]};recurrenceDraft=[rule];");h.ui.openRecurrence(0);
+  h.element('rule-title').value='编辑中的规则';
+  await h.ui.loadRecurrences();
+  assert.equal(h.calls.length,0);
+  assert.equal(h.element('rule-title').value,'编辑中的规则');
+});
+
+test('refreshing the same saved day invalidates a previous preview result', async()=>{
+  const h=harness();h.context.oldPreview=previewFor();h.run('previewData=oldPreview;');
+  await h.ui.loadDetail();
+  assert.equal(h.snapshot().previewData,null);
+  assert.doesNotMatch(h.element('preview-result').innerHTML,/静默暂存/);
+});
+
+test('an auxiliary diary error cannot discard unrelated drafts after a successful save', async()=>{
+  const h=harness(async(method,resource,data)=>{
+    if(method==='POST')return {saved:true};
+    if(resource==='detail')return detailFor(data.persona_id,data.date);
+    if(resource==='diary')throw new Error('diary unavailable');
+  });
+  h.run("tab='diary';dirty=true;dirtyKinds.add('calendar');dirtyKinds.add('profile');detail.profile.identity='尚未保存的身份';");
+  await h.ui.save('calendar',[]);
+  assert.equal(h.snapshot().detail.profile.identity,'尚未保存的身份');
+  assert.equal(h.snapshot().dirty,true);assert.deepEqual(h.snapshot().dirtyKinds,['profile']);
+  assert.equal(h.ui.controlsLocked(),false);
+});

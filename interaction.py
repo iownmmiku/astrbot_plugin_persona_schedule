@@ -35,7 +35,6 @@ class InteractionMixin:
         if not self.store.settings["adaptive_enabled"]:
             return slot
         adjustment = self.adjustments.get(env["umo"])
-        record = self.store.data["personas"].get(env["persona"]["id"], {})
         source = self._cached_schedule(env["persona"], (adjustment or {}).get("date", ""), now)
         if adjustment and adjustment.get("source_fingerprint") and (not source or digest(source) != adjustment["source_fingerprint"]):
             return slot
@@ -44,7 +43,6 @@ class InteractionMixin:
             schedule_date=schedule["date"], source_revision=source.get("revision", 1) if source else None)
 
     def _target(self, env, schedule, now):
-        record = self.store.data["personas"].get(env["persona"]["id"], {})
         tomorrow = (now.date() + timedelta(days=1)).isoformat()
         yesterday = (now.date() - timedelta(days=1)).isoformat()
         return target_activity(schedule, now, self.store.settings["transition_notice_minutes"],

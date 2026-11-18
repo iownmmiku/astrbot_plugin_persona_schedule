@@ -1,0 +1,7 @@
+[tool.ruff]
+line-length = 140
+extend-exclude = [".qa", "tests"]
+
+[tool.ruff.lint]
+# Pyflakes (undefined/unused names) plus syntax errors; style rules stay off.
+select = ["E9", "F"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import math
 import re
@@ -9,6 +10,13 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+NAME = "astrbot_plugin_persona_schedule"
+
+
+async def maybe_await(value):
+    return await value if inspect.isawaitable(value) else value
+
 
 DEFAULTS = {
     "enabled": False,
@@ -368,8 +376,21 @@ class Store:
     def settings(self):
         return self.data["settings"]
 
+    def save_soon(self):
+        """Mark non-critical changes (diagnostic logs) for the next flush.
+
+        Queue, budget and schedule writes still use save() and persist at once;
+        any save() also carries pending changes because it writes the whole state.
+        """
+        self._dirty = True
+
+    def flush(self):
+        if getattr(self, "_dirty", False):
+            self.save()
+
     def save(self):
         import time
+        self._dirty = False
         started = time.perf_counter()
         temp = self.path.with_suffix(".tmp")
         try:
@@ -402,10 +423,12 @@ class Store:
         return {**self._save_metrics, "p50_ms": percentile(.5), "p95_ms": percentile(.95),
                 "sample_count": len(samples), "recovery": copy.deepcopy(self.data.get("recovery_info"))}
 
-    def log(self, message):
+    def log(self, message, *, defer=False):
+        """Append a log row. Callers whose save doubles as a commit point keep
+        the immediate write; purely diagnostic ones pass defer=True."""
         self.data["logs"].append({"at": datetime.now(timezone.utc).isoformat(), "message": message})
         self.data["logs"] = self.data["logs"][-150:]
-        self.save()
+        self.save_soon() if defer else self.save()
 
     def enqueue(self, umo, cid, persona_key, title, message, now, due, state, activity=""):
         queue = self.data["queues"].get(umo)

@@ -63,8 +63,8 @@ def _validate_state(data):
     return data
 
 
-def read_backup(store, identity):
-    path = _path(store, identity)
+def _parse_backup(path):
+    """Read, verify and validate one backup file with a single disk read."""
     if path.stat().st_size > MAX_BACKUP_BYTES:
         raise ValueError("备份超过 64 MiB 读取上限")
     value = json.loads(path.read_text(encoding="utf-8"))
@@ -72,27 +72,46 @@ def read_backup(store, identity):
         raise ValueError("不支持的备份格式或版本")
     if value.get("sha256") != _checksum(value.get("data")):
         raise ValueError("备份完整性校验失败")
-    return _validate_state(value["data"])
+    return value, _validate_state(value["data"])
+
+
+def read_backup(store, identity):
+    return _parse_backup(_path(store, identity))[1]
 
 
 def list_backups(store):
-    result = []
-    for path in sorted(_folder(store).glob("backup-*.json"), reverse=True):
+    # Verifying a backup re-reads and re-hashes the whole file. Results are
+    # cached by (size, mtime) so repeated listings only stat unchanged files.
+    cache = store.__dict__.setdefault("_backup_rows", {})
+    result, seen = [], set()
+    for path in _folder(store).glob("backup-*.json"):
         if not re.fullmatch(r"backup-[0-9T]+-[a-f0-9]{12}\.json", path.name):
             continue
-        row = {"id": path.name, "at": path.stat().st_mtime, "size": path.stat().st_size,
-               "_modified_ns": path.stat().st_mtime_ns,
-               "valid": False, "checksum": "", "persona_count": 0}
         try:
-            data = read_backup(store, path.name)
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if type(value.get("created_at")) not in (int, float) or not math.isfinite(value["created_at"]):
-                raise ValueError("备份时间无效")
-            row.update(at=value["created_at"], valid=True, checksum=value["sha256"],
-                       persona_count=len(data["personas"]))
-        except (ValueError, TypeError, KeyError, OSError):
-            row["error"] = "备份损坏、格式不支持或无法读取"
+            stat = path.stat()
+        except OSError:
+            continue
+        seen.add(path.name)
+        stamp = (stat.st_size, stat.st_mtime_ns)
+        cached = cache.get(path.name)
+        if cached and cached[0] == stamp:
+            row = dict(cached[1])
+        else:
+            row = {"id": path.name, "at": stat.st_mtime, "size": stat.st_size,
+                   "_modified_ns": stat.st_mtime_ns,
+                   "valid": False, "checksum": "", "persona_count": 0}
+            try:
+                value, data = _parse_backup(path)
+                if type(value.get("created_at")) not in (int, float) or not math.isfinite(value["created_at"]):
+                    raise ValueError("备份时间无效")
+                row.update(at=value["created_at"], valid=True, checksum=value["sha256"],
+                           persona_count=len(data["personas"]))
+            except (ValueError, TypeError, KeyError, OSError):
+                row["error"] = "备份损坏、格式不支持或无法读取"
+            cache[path.name] = (stamp, dict(row))
         result.append(row)
+    for name in set(cache) - seen:
+        cache.pop(name, None)
     result.sort(key=lambda row: (row["at"], row["_modified_ns"], row["id"]), reverse=True)
     for row in result:
         row.pop("_modified_ns")

@@ -71,7 +71,7 @@ class InteractionMixin:
                 marker = {"identity": identity, "active": active}
                 event.set_extra("persona_schedule:interaction", marker)
                 meta["last_inbound"] = now.timestamp()
-                self.store.save()
+                self.store.save_soon()
             active = marker["active"]
             if not settings["adaptive_enabled"]:
                 return

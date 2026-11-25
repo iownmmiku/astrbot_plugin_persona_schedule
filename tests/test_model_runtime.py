@@ -223,3 +223,42 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CallTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = Store(self.temp.name)
+
+    async def asyncTearDown(self):
+        self.temp.cleanup()
+
+    async def test_queue_wait_does_not_count_against_call_timeout(self):
+        runtime = ModelRuntime(self.store, capacity=1)
+        release = asyncio.Event()
+        async def lookup(_purpose):
+            return "provider"
+        async def slow(_provider):
+            await release.wait()
+            return {"completion_text": "first"}
+        async def quick(_provider):
+            return {"completion_text": "second"}
+        first = asyncio.create_task(runtime.invoke("reply", lookup, slow))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(runtime.invoke("reply", lookup, quick, timeout=0.05))
+        await asyncio.sleep(0.15)  # queued three times longer than its call timeout
+        release.set()
+        self.assertEqual((await second)["completion_text"], "second")
+        await first
+
+    async def test_slow_provider_call_times_out_and_counts_as_failed(self):
+        runtime = ModelRuntime(self.store, capacity=1)
+        async def lookup(_purpose):
+            return "provider"
+        async def hang(_provider):
+            await asyncio.sleep(5)
+        with self.assertRaises(TimeoutError):
+            await runtime.invoke("reply", lookup, hang, timeout=0.05)
+        day = runtime.snapshot()["today"]["purposes"]["reply"]
+        self.assertEqual(day["failed"], 1)
+        self.assertEqual(runtime.limiter.active, 0)

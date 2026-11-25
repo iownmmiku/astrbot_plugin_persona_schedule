@@ -185,6 +185,20 @@ class IncidentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*list(self.plugin.tasks), return_exceptions=True)
         self.temp.cleanup()
 
+    async def test_old_finished_draws_are_pruned_but_open_and_recent_rows_stay(self):
+        entries = self.plugin.store.data["incidents"]
+        old = (datetime.fromisoformat(DAY) - timedelta(days=120)).date().isoformat()
+        recent = (datetime.fromisoformat(DAY) - timedelta(days=10)).date().isoformat()
+        base = {"persona_id": PERSONA["id"], "persona_key": PERSONA["key"]}
+        entries["old-ended"] = {**base, "date": old, "status": "ended"}
+        entries["old-missed"] = {**base, "date": old, "status": "missed"}
+        entries["recent-ended"] = {**base, "date": recent, "status": "ended"}
+        self.plugin._reconcile_incidents(self.plugin.now)
+        kept = self.plugin.store.data["incidents"]
+        self.assertNotIn("old-ended", kept)
+        self.assertNotIn("old-missed", kept)
+        self.assertIn("recent-ended", kept)
+
     async def test_disabled_has_no_lottery_no_model_and_unchanged_plan(self):
         self.plugin.store.settings["incident_enabled"] = False
         before = copy.deepcopy(self.plugin.base)

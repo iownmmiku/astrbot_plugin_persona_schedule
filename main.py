@@ -36,7 +36,7 @@ LOCKED_DAY_ARCHIVE = 90       # date-specific lock archives kept per persona
 FAILURE_RETRY_SECONDS = 300   # backoff after a failed automatic task
 
 
-@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.8")
+@register(NAME, "iownmmiku", "按人设生成生活日程、活动、日记和合并补回消息", "0.3.9")
 class PersonaSchedule(WebMixin, MaintenanceMixin, IncidentMixin, WorkbenchMixin, InteractionMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -602,7 +602,9 @@ class PersonaSchedule(WebMixin, MaintenanceMixin, IncidentMixin, WorkbenchMixin,
         if len(sessions) > 2000:
             oldest = min(sessions, key=lambda u: sessions[u]["last_seen"])
             sessions.pop(oldest)
-        self.store.save()
+        # Titles and last_seen are bookkeeping; the next flush or any critical
+        # save (such as queueing this message) persists them.
+        self.store.save_soon()
 
     def _control(self, event):
         try:

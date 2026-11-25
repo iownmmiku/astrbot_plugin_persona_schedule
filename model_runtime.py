@@ -134,7 +134,10 @@ class ModelRuntime:
             outgoing = get("completion_tokens")
         return (incoming, outgoing) if incoming is not None and outgoing is not None else None
 
-    async def invoke(self, purpose, provider_lookup, invoke, *, guard=None, retry=False):
+    async def invoke(self, purpose, provider_lookup, invoke, *, guard=None, retry=False, timeout=None):
+        """Run one provider call. ``timeout`` covers only the provider call,
+        not the wait for a concurrency slot, so queued work is not failed
+        merely because other generations were running."""
         purpose, background = self.classify(purpose)
         priority = 0 if purpose in {"reply", "adaptive"} else 10 if background else 5
         async with self.limiter.slot(priority=priority, background=background) as waited:
@@ -180,7 +183,8 @@ class ModelRuntime:
                 raise
             start = time.monotonic()
             try:
-                response = await invoke(provider_id)
+                call = invoke(provider_id)
+                response = await (asyncio.wait_for(call, timeout) if timeout else call)
             except asyncio.CancelledError:
                 row["cancelled"] += 1
                 raise
